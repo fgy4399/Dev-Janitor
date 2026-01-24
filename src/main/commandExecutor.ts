@@ -13,8 +13,51 @@
 import { exec, ExecOptions } from 'child_process'
 import { promisify } from 'util'
 import { CommandResult } from '../shared/types'
+import os from 'node:os'
+import path from 'node:path'
 
 const execAsync = promisify(exec)
+
+function prependUniquePathEntries(currentPath: string | undefined, entriesToPrepend: string[]): string {
+  const separator = isWindows() ? ';' : ':'
+  const parts = (currentPath || '')
+    .split(separator)
+    .map(p => p.trim())
+    .filter(Boolean)
+
+  const seen = new Set(parts)
+
+  // Preserve the given entries order while prepending.
+  for (let index = entriesToPrepend.length - 1; index >= 0; index--) {
+    const entry = entriesToPrepend[index]
+    if (!entry || seen.has(entry)) continue
+    parts.unshift(entry)
+    seen.add(entry)
+  }
+
+  return parts.join(separator)
+}
+
+function ensureMacOSPathCompatibility(): void {
+  // macOS GUI apps launched from Finder often have a minimal PATH (missing Homebrew, etc.).
+  // This causes tool detection/package listing to incorrectly report "not installed".
+  if (process.platform !== 'darwin') return
+
+  const homeDir = os.homedir()
+  const commonBinDirs = [
+    '/opt/homebrew/bin',
+    '/opt/homebrew/sbin',
+    '/usr/local/bin',
+    '/usr/local/sbin',
+    path.join(homeDir, '.local', 'bin'),
+    path.join(homeDir, 'bin'),
+    path.join(homeDir, '.cargo', 'bin'),
+  ]
+
+  process.env.PATH = prependUniquePathEntries(process.env.PATH, commonBinDirs)
+}
+
+ensureMacOSPathCompatibility()
 
 /**
  * Timeout presets for different command categories
