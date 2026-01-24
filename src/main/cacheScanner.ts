@@ -129,9 +129,17 @@ async function getDirectorySizeFast(dirPath: string): Promise<number> {
       return isNaN(size) ? 0 : size
     } else {
       // Unix: use du command
-      result = await execAsync(`du -sb "${dirPath}" 2>/dev/null | cut -f1`, { timeout: 10000 })
-      const size = parseInt(result.stdout.trim(), 10)
-      return isNaN(size) ? 0 : size
+      // NOTE: GNU du supports "-b" (bytes) but macOS/BSD du doesn't.
+      // Use "-k" on macOS and convert KiB -> bytes for compatibility.
+      const isMac = process.platform === 'darwin'
+      const duCommand = isMac
+        ? `du -sk "${dirPath}" 2>/dev/null | cut -f1`
+        : `du -sb "${dirPath}" 2>/dev/null | cut -f1`
+
+      result = await execAsync(duCommand, { timeout: 10000 })
+      const rawSize = parseInt(result.stdout.trim(), 10)
+      if (isNaN(rawSize)) return 0
+      return isMac ? rawSize * 1024 : rawSize
     }
   } catch {
     // Fallback to manual calculation with limited depth
