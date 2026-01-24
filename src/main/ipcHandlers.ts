@@ -13,6 +13,7 @@
  */
 
 import { ipcMain, BrowserWindow, shell, app, dialog } from 'electron'
+import os from 'node:os'
 import { detectionEngine } from './detectionEngine'
 import { packageManager, PackageDiscovery } from './packageManager'
 import { serviceMonitor } from './serviceMonitor'
@@ -128,7 +129,7 @@ function registerToolsHandlers(): void {
   // Get uninstall info for a tool
   ipcMain.handle('tools:get-uninstall-info', async (_event, toolName: string): Promise<{ canUninstall: boolean; command?: string; warning?: string; manualInstructions?: string }> => {
     try {
-      return detectionEngine.getUninstallInfo(toolName)
+      return await detectionEngine.getUninstallInfo(toolName)
     } catch (error) {
       console.error(`Error getting uninstall info for ${toolName}:`, error)
       return { canUninstall: false, manualInstructions: 'Unable to determine uninstall method' }
@@ -665,17 +666,47 @@ function registerAppHandlers(): void {
  * Register all IPC handlers for shell operations
  */
 function registerShellHandlers(): void {
+  const expandUserPath = (inputPath: string): string => {
+    const trimmed = inputPath.trim()
+    const homeDir = os.homedir()
+
+    let expanded = trimmed
+
+    // Expand leading ~ (Unix-like home shorthand)
+    if (expanded === '~') {
+      expanded = homeDir
+    } else if (expanded.startsWith('~/') || expanded.startsWith('~\\')) {
+      expanded = `${homeDir}${expanded.slice(1)}`
+    }
+
+    // Expand common home env vars
+    expanded = expanded.replace(/%USERPROFILE%/gi, homeDir)
+    expanded = expanded.replace(/\$\{HOME\}/g, homeDir)
+    expanded = expanded.replace(/\$HOME\b/g, homeDir)
+
+    return expanded
+  }
+
   // Open a path in file explorer
   ipcMain.handle('shell:open-path', async (_event, path: string): Promise<string> => {
     try {
-      // Validate path doesn't contain path traversal (Requirement 2.3)
-      const pathValidation = inputValidator.validatePath(path);
-      if (!pathValidation.valid) {
-        console.warn(`Security warning: Path validation failed: ${pathValidation.error}`);
-        return pathValidation.error!;
+      // Validate raw path doesn't contain path traversal (Requirement 2.3)
+      const rawValidation = inputValidator.validatePath(path);
+      if (!rawValidation.valid) {
+        console.warn(`Security warning: Path validation failed: ${rawValidation.error}`);
+        return rawValidation.error!;
       }
 
-      return await shell.openPath(pathValidation.value!)
+      const expandedPath = expandUserPath(rawValidation.value!)
+
+      // Validate expanded path as well (defense-in-depth)
+      const expandedValidation = inputValidator.validatePath(expandedPath);
+      if (!expandedValidation.valid) {
+        console.warn(`Security warning: Expanded path validation failed: ${expandedValidation.error}`);
+        return expandedValidation.error!;
+      }
+
+      return await shell.openPath(expandedValidation.value!)
     } catch (error) {
       console.error('Error opening path:', error)
       return error instanceof Error ? error.message : 'Unknown error'

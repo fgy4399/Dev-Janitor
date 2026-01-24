@@ -9,7 +9,7 @@
  * Validates: Requirements 1.2-1.9, 2.1-2.5
  */
 
-import { promises as fs } from 'fs'
+import { promises as fs, realpathSync } from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import { ToolInfo, DetectionSummary, CommandResult, AICLITool } from '../shared/types'
@@ -239,10 +239,30 @@ export function detectInstallMethod(
 ): ToolInfo['installMethod'] {
   if (!path) return 'manual'
 
-  const lowerPath = path.toLowerCase()
+  const trimmedPath = path.trim()
+
+  // On macOS, many tools are symlinked into /usr/local/bin or /opt/homebrew/bin.
+  // Resolve symlinks to improve install method detection (Homebrew vs npm, etc.).
+  let effectivePath = trimmedPath
+  if (process.platform === 'darwin') {
+    try {
+      effectivePath = realpathSync(trimmedPath)
+    } catch {
+      // Best effort only
+      effectivePath = trimmedPath
+    }
+  }
+
+  const lowerPath = effectivePath.toLowerCase()
 
   // Check for common package manager installation paths
-  if (lowerPath.includes('homebrew') || lowerPath.includes('/opt/homebrew')) {
+  if (
+    lowerPath.includes('homebrew') ||
+    lowerPath.includes('/opt/homebrew') ||
+    lowerPath.includes('/usr/local/cellar') ||
+    lowerPath.includes('/caskroom/') ||
+    lowerPath.includes('/cellar/')
+  ) {
     return 'homebrew'
   }
   if (lowerPath.includes('chocolatey') || lowerPath.includes('choco')) {
@@ -960,6 +980,11 @@ export class DetectionEngine {
       }
     }
 
+    // Populate cache so follow-up operations (like uninstall info) don't need to re-detect.
+    for (const tool of results) {
+      this.cache.set(tool.name.toLowerCase(), tool)
+    }
+
     return results
   }
 
@@ -1125,15 +1150,27 @@ export class DetectionEngine {
       const output = versionResult.stdout || versionResult.stderr
       const { version } = parseVersion(output)
       const path = await this.executor.getToolPath(def.command)
-      
+
+      // Resolve symlinks to improve install method detection (Homebrew vs npm vs script/binary)
+      const resolvedPath = path ? await fs.realpath(path).catch(() => path) : null
+      const lowerResolvedPath = (resolvedPath || path || '').toLowerCase()
+      const lowerHomeDir = os.homedir().toLowerCase()
+
       let installMethod: AICLITool['installMethod'] = 'unknown'
-      if (path) {
-        if (path.includes('npm') || path.includes('node_modules')) {
+      if (lowerResolvedPath) {
+        if (lowerResolvedPath.includes('node_modules') || lowerResolvedPath.includes('/npm/')) {
           installMethod = 'npm'
-        } else if (path.includes('homebrew') || path.includes('Cellar')) {
+        } else if (
+          lowerResolvedPath.includes('homebrew') ||
+          lowerResolvedPath.includes('/opt/homebrew') ||
+          lowerResolvedPath.includes('/cellar/') ||
+          lowerResolvedPath.includes('/caskroom/')
+        ) {
           installMethod = 'brew'
-        } else if (path.includes('.opencode') || path.includes('bin')) {
+        } else if (lowerResolvedPath.startsWith(lowerHomeDir)) {
           installMethod = 'script'
+        } else {
+          installMethod = 'binary'
         }
       }
 
@@ -1268,12 +1305,35 @@ export class DetectionEngine {
       iflow: 'iflow-cli',
     }
 
-    const packageName = packageMap[toolName]
-    if (!packageName) {
-      return { success: false, error: `Unknown AI CLI tool: ${toolName}` }
-    }
-
     try {
+      const detectedTools = await this.detectAICLITools()
+      const detected = detectedTools.find(t => t.name === toolName)
+
+      if (!detected || !detected.isInstalled) {
+        return { success: false, error: `${toolName} is not installed` }
+      }
+
+      if (detected.installMethod === 'brew') {
+        const result = await this.executor.executeSafe(`brew uninstall ${detected.command}`)
+        if (result.success) {
+          this.cache.invalidate(toolName)
+          return { success: true }
+        }
+        return { success: false, error: result.stderr || 'Uninstallation failed' }
+      }
+
+      const packageName = packageMap[toolName]
+      if (!packageName) {
+        return { success: false, error: `Unknown AI CLI tool: ${toolName}` }
+      }
+
+      if (detected.installMethod !== 'npm') {
+        return {
+          success: false,
+          error: `Detected install method: ${detected.installMethod}. Automatic uninstall currently supports npm/brew installs. Please uninstall manually.`,
+        }
+      }
+
       // Step 1: Uninstall the package with --force flag
       await this.executor.executeSafe(`npm uninstall -g ${packageName} --force`)
       
@@ -1334,6 +1394,33 @@ export class DetectionEngine {
    */
   async uninstallTool(toolName: string): Promise<{ success: boolean; error?: string; command?: string }> {
     const lowerName = toolName.toLowerCase()
+    const platform = process.platform as 'win32' | 'darwin' | 'linux'
+
+    // On macOS, avoid running package-manager-specific uninstall commands unless they match
+    // the detected installation method (Homebrew vs npm vs manual/system).
+    if (platform === 'darwin') {
+      const uninstallInfo = await this.getUninstallInfo(toolName)
+
+      if (!uninstallInfo.canUninstall || !uninstallInfo.command) {
+        return {
+          success: false,
+          error: uninstallInfo.manualInstructions || `Uninstall not supported for ${toolName}. Please uninstall manually.`,
+        }
+      }
+
+      const command = uninstallInfo.command
+
+      try {
+        const result = await this.executor.executeSafe(command)
+        if (result.success) {
+          this.cache.invalidate(lowerName)
+          return { success: true, command }
+        }
+        return { success: false, error: result.stderr || 'Uninstallation failed', command }
+      } catch (error) {
+        return { success: false, error: error instanceof Error ? error.message : 'Unknown error', command }
+      }
+    }
     
     // Define uninstall commands for different tools and platforms
     const uninstallCommands: Record<string, { win32: string; darwin: string; linux: string; warning?: string }> = {
@@ -1494,7 +1581,6 @@ export class DetectionEngine {
       },
     }
 
-    const platform = process.platform as 'win32' | 'darwin' | 'linux'
     const toolConfig = uninstallCommands[lowerName]
 
     if (!toolConfig) {
@@ -1535,15 +1621,133 @@ export class DetectionEngine {
   /**
    * Get uninstall information for a tool (without executing)
    */
-  getUninstallInfo(toolName: string): { 
+  async getUninstallInfo(toolName: string): Promise<{ 
     canUninstall: boolean; 
     command?: string; 
     warning?: string;
     manualInstructions?: string;
-  } {
+  }> {
     const lowerName = toolName.toLowerCase()
     const platform = process.platform as 'win32' | 'darwin' | 'linux'
-    
+
+    const toolWarnings: Record<string, string> = {
+      node: 'This will remove Node.js and may affect npm packages',
+      python: 'This will remove Python and may affect pip packages',
+      python3: 'This will remove Python and may affect pip packages',
+      php: 'This will remove PHP and may affect Composer packages',
+      java: 'This will remove Java JDK',
+      rust: 'This will remove Rust and Cargo',
+      rustc: 'This will remove Rust and Cargo',
+      cargo: 'This will remove Rust and Cargo',
+      git: 'This will remove Git version control',
+      docker: 'This will remove Docker and all containers',
+      nvm: 'This will remove nvm and all Node.js versions managed by it',
+      pyenv: 'This will remove pyenv and all Python versions managed by it',
+      rbenv: 'This will remove rbenv and all Ruby versions managed by it',
+    }
+
+    const manualInstructions = platform === 'win32'
+      ? `Please uninstall ${toolName} through Windows Settings > Apps > Installed Apps`
+      : `Please uninstall ${toolName} manually.`
+
+    // macOS: derive uninstall command based on detected install method to avoid wrong commands.
+    if (platform === 'darwin') {
+      const cached = this.cache.get(lowerName)
+      const detected = cached ?? await this.detectTool(toolName).catch(() => null)
+
+      if (!detected || !detected.isInstalled) {
+        return { canUninstall: false, manualInstructions }
+      }
+
+      // Homebrew itself shouldn't be auto-uninstalled by this app.
+      if (lowerName === 'brew') {
+        return {
+          canUninstall: false,
+          manualInstructions: 'Homebrew uninstall is not supported here. Please follow official instructions to uninstall Homebrew.',
+        }
+      }
+
+      const toolPath = detected.path
+      const lowerPath = (toolPath || '').toLowerCase()
+
+      const isSystemPath = lowerPath.startsWith('/usr/bin/')
+        || lowerPath.startsWith('/bin/')
+        || lowerPath.startsWith('/sbin/')
+        || lowerPath.startsWith('/system/')
+
+      if (toolPath && isSystemPath) {
+        return {
+          canUninstall: false,
+          manualInstructions: `Detected a system-provided tool at ${toolPath}. Automatic uninstall is disabled.`,
+        }
+      }
+
+      // Rust managed by rustup uses a dedicated uninstall command.
+      if (lowerName === 'rust' || lowerName === 'rustc' || lowerName === 'cargo') {
+        return {
+          canUninstall: true,
+          command: 'rustup self uninstall -y',
+          warning: toolWarnings[lowerName],
+        }
+      }
+
+      const installMethod = detected.installMethod ?? detectInstallMethod(toolPath)
+
+      const brewPackageOverrides: Record<string, string> = {
+        java: 'openjdk',
+        aws: 'awscli',
+        az: 'azure-cli',
+        gcloud: 'google-cloud-sdk',
+        mvn: 'maven',
+        svn: 'subversion',
+      }
+
+      if (installMethod === 'homebrew') {
+        const brewPackageName = brewPackageOverrides[lowerName] ?? lowerName
+        let isCask = lowerPath.includes('/caskroom/')
+        if (!isCask && toolPath) {
+          try {
+            isCask = realpathSync(toolPath).toLowerCase().includes('/caskroom/')
+          } catch {
+            // Best effort only
+          }
+        }
+
+        return {
+          canUninstall: true,
+          command: isCask ? `brew uninstall --cask ${brewPackageName}` : `brew uninstall ${brewPackageName}`,
+          warning: toolWarnings[lowerName],
+        }
+      }
+
+      if (installMethod === 'npm') {
+        return {
+          canUninstall: true,
+          command: `npm uninstall -g ${lowerName}`,
+          warning: toolWarnings[lowerName],
+        }
+      }
+
+      // Common script-based installs
+      if (lowerName === 'deno') {
+        return { canUninstall: true, command: 'rm -rf ~/.deno' }
+      }
+      if (lowerName === 'bun') {
+        return { canUninstall: true, command: 'rm -rf ~/.bun' }
+      }
+      if (lowerName === 'nvm') {
+        return { canUninstall: true, command: 'rm -rf ~/.nvm', warning: toolWarnings[lowerName] }
+      }
+      if (lowerName === 'pyenv') {
+        return { canUninstall: true, command: 'rm -rf ~/.pyenv', warning: toolWarnings[lowerName] }
+      }
+      if (lowerName === 'rbenv') {
+        return { canUninstall: true, command: 'rm -rf ~/.rbenv', warning: toolWarnings[lowerName] }
+      }
+
+      return { canUninstall: false, manualInstructions }
+    }
+
     const uninstallCommands: Record<string, { win32: string; darwin: string; linux: string; warning?: string }> = {
       'yarn': { win32: 'npm uninstall -g yarn', darwin: 'npm uninstall -g yarn', linux: 'npm uninstall -g yarn' },
       'pnpm': { win32: 'npm uninstall -g pnpm', darwin: 'npm uninstall -g pnpm', linux: 'npm uninstall -g pnpm' },
@@ -1569,9 +1773,7 @@ export class DetectionEngine {
     if (!toolConfig) {
       return { 
         canUninstall: false,
-        manualInstructions: platform === 'win32' 
-          ? `Please uninstall ${toolName} through Windows Settings > Apps > Installed Apps`
-          : `Please uninstall ${toolName} manually.`
+        manualInstructions
       }
     }
 
@@ -1579,9 +1781,7 @@ export class DetectionEngine {
     if (!command) {
       return { 
         canUninstall: false,
-        manualInstructions: platform === 'win32' 
-          ? `Please uninstall ${toolName} through Windows Settings > Apps > Installed Apps`
-          : `Please uninstall ${toolName} manually.`
+        manualInstructions
       }
     }
 

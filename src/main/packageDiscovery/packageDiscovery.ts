@@ -247,6 +247,10 @@ export class PackageDiscovery {
     }
 
     try {
+      const isAvailable = await handler.checkAvailability()
+      if (!isAvailable) {
+        return false
+      }
       return await handler.uninstallPackage(packageName, options)
     } catch (error) {
       console.error(`Error uninstalling ${packageName} from ${manager}:`, error)

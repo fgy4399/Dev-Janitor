@@ -120,6 +120,7 @@
     "npm": "NPM 包",
     "pip": "Python 包",
     "composer": "Composer 包",
+    "brew": "Homebrew 包",
     "name": "名称",
     "version": "版本",
     "versionStatus": "版本状态",
@@ -392,7 +393,8 @@
     "uninstallFailed": "卸载 AI CLI 工具失败",
     "uninstallConfirm": "确定要卸载 {{name}} 吗？",
     "openHomepage": "打开官网",
-    "openConfig": "打开配置目录"
+    "openConfig": "打开配置目录",
+    "openConfigFailed": "打开配置目录失败"
   },
   "cacheCleaner": {
     "title": "缓存清理",

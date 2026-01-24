@@ -119,9 +119,22 @@ export class BrewHandler implements PackageManagerHandler {
    * @returns true if successful, false otherwise
    */
   async uninstallPackage(packageName: string, options?: UninstallOptions): Promise<boolean> {
-    const brewCmd = this.brewPath || this.executable
-    const caskFlag = options?.cask ? '--cask ' : ''
-    const command = `${brewCmd} uninstall ${caskFlag}${packageName}`
+    // Require a resolved brew path to avoid executing unintended commands when Homebrew
+    // availability hasn't been checked (PackageDiscovery calls checkAvailability first).
+    if (!this.brewPath) {
+      return false
+    }
+
+    const brewCmd = this.brewPath
+    const flags = [
+      options?.cask ? '--cask' : null,
+      options?.force ? '--force' : null,
+      ...(options?.flags || [])
+    ]
+      .filter(Boolean)
+      .join(' ')
+
+    const command = `${brewCmd} uninstall ${flags ? `${flags} ` : ''}${packageName}`
     
     const result = await executeSafe(command)
     return result.success

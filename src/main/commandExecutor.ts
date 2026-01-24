@@ -42,6 +42,12 @@ function ensureMacOSPathCompatibility(): void {
   // macOS GUI apps launched from Finder often have a minimal PATH (missing Homebrew, etc.).
   // This causes tool detection/package listing to incorrectly report "not installed".
   if (process.platform !== 'darwin') return
+  const isTestEnvironment =
+    process.env.NODE_ENV === 'test' ||
+    process.env.VITEST === 'true' ||
+    process.env.VITEST === '1' ||
+    process.argv.some(arg => arg.includes('vitest'))
+  if (isTestEnvironment) return
 
   const homeDir = os.homedir()
   const commonBinDirs = [

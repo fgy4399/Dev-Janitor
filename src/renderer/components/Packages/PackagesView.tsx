@@ -12,7 +12,7 @@
  */
 
 import React, { useState, useEffect, useMemo } from 'react'
-import { Typography, Tabs, Input, Alert, Empty, Badge, message, Button, Space, Tooltip } from 'antd'
+import { Typography, Tabs, Input, Alert, Empty, Badge, Button, Space, Tooltip, message } from 'antd'
 import { SearchOutlined, WarningOutlined, CheckCircleOutlined, CopyOutlined } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from '../../store'
@@ -21,7 +21,7 @@ import type { PackageInfo, PackageManagerStatus } from '@shared/types'
 
 const { Title, Text } = Typography
 
-type PackageManager = 'npm' | 'pip' | 'composer'
+type PackageManager = 'npm' | 'pip' | 'composer' | 'brew'
 
 const PackagesView: React.FC = () => {
   const { t } = useTranslation()
@@ -29,10 +29,10 @@ const PackagesView: React.FC = () => {
     npmPackages,
     pipPackages,
     composerPackages,
+    brewPackages,
     packagesLoading,
     packagesError,
     loadPackages,
-    uninstallPackage,
     tools,
   } = useAppStore()
 
@@ -43,10 +43,10 @@ const PackagesView: React.FC = () => {
 
   // Load packages on mount
   useEffect(() => {
-    if (npmPackages.length === 0 && pipPackages.length === 0 && composerPackages.length === 0 && !packagesLoading) {
+    if (npmPackages.length === 0 && pipPackages.length === 0 && composerPackages.length === 0 && brewPackages.length === 0 && !packagesLoading) {
       loadPackages('all')
     }
-  }, [npmPackages.length, pipPackages.length, composerPackages.length, packagesLoading, loadPackages])
+  }, [npmPackages.length, pipPackages.length, composerPackages.length, brewPackages.length, packagesLoading, loadPackages])
 
   // Load package manager statuses on mount
   useEffect(() => {
@@ -87,6 +87,10 @@ const PackagesView: React.FC = () => {
     return tools.some(tool => tool.name.toLowerCase() === 'composer' && tool.isInstalled)
   }, [tools])
 
+  const isBrewInstalled = useMemo(() => {
+    return tools.some(tool => tool.name.toLowerCase() === 'brew' && tool.isInstalled)
+  }, [tools])
+
   // Get packages for current tab
   const getCurrentPackages = (): PackageInfo[] => {
     switch (activeTab) {
@@ -96,6 +100,8 @@ const PackagesView: React.FC = () => {
         return pipPackages
       case 'composer':
         return composerPackages
+      case 'brew':
+        return brewPackages
       default:
         return []
     }
@@ -112,17 +118,7 @@ const PackagesView: React.FC = () => {
       pkg.name.toLowerCase().includes(lowerSearch) ||
       pkg.version.toLowerCase().includes(lowerSearch)
     )
-  }, [activeTab, npmPackages, pipPackages, composerPackages, searchText])
-
-  // Handle uninstall
-  const handleUninstall = async (packageName: string) => {
-    const success = await uninstallPackage(packageName, activeTab)
-    if (success) {
-      message.success(t('packages.uninstallSuccess'))
-    } else {
-      message.error(t('packages.uninstallFailed'))
-    }
-  }
+  }, [activeTab, npmPackages, pipPackages, composerPackages, brewPackages, searchText])
 
   // Handle refresh
   const handleRefresh = () => {
@@ -154,6 +150,8 @@ const PackagesView: React.FC = () => {
         return isPipInstalled
       case 'composer':
         return isComposerInstalled
+      case 'brew':
+        return isBrewInstalled
       default:
         return false
     }
@@ -267,22 +265,33 @@ const PackagesView: React.FC = () => {
       ),
       children: null,
     },
+    {
+      key: 'brew',
+      label: (
+        <Badge count={brewPackages.length} size="small" offset={[10, 0]}>
+          <Space size={4}>
+            <span>{t('packages.brew', 'Homebrew Packages')}</span>
+            {renderStatusIndicator('brew')}
+          </Space>
+        </Badge>
+      ),
+      children: null,
+    },
   ]
 
   // Render content based on manager installation status
   const renderContent = () => {
     // 优先显示加载状态，防止工具检测未完成导致的误判
     if (packagesLoading) {
-      return (
-        <PackageTable
-          packages={filteredPackages}
-          loading={true}
-          onUninstall={handleUninstall}
-          onRefresh={handleRefresh}
-          manager={activeTab}
-        />
-      )
-    }
+    return (
+      <PackageTable
+        packages={filteredPackages}
+        loading={true}
+        onRefresh={handleRefresh}
+        manager={activeTab}
+      />
+    )
+  }
 
     // 错误处理
     if (packagesError) {
@@ -321,7 +330,6 @@ const PackagesView: React.FC = () => {
       <PackageTable
         packages={filteredPackages}
         loading={false}
-        onUninstall={handleUninstall}
         onRefresh={handleRefresh}
         manager={activeTab}
       />

@@ -8,7 +8,7 @@
  * Validates: Requirements 1.1, 3.1, 4.1, 10.1, 11.1, 13.1, 13.2, 13.3, 13.4
  */
 
-import type { ToolInfo, PackageInfo, RunningService, EnvironmentVariable } from '@shared/types'
+import type { ToolInfo, PackageInfo, RunningService, EnvironmentVariable, PackageManagerStatus } from '@shared/types'
 
 // Re-export IPC timeout utilities
 export {
@@ -119,6 +119,61 @@ export async function listComposerPackages(): Promise<PackageInfo[]> {
     return []
   }
   return window.electronAPI.packages.listComposer()
+}
+
+/**
+ * Discover available package managers (enhanced)
+ */
+export async function discoverPackageManagers(): Promise<PackageManagerStatus[]> {
+  if (!isElectron()) {
+    console.warn('discoverPackageManagers: Not running in Electron environment')
+    return []
+  }
+
+  if (!window.electronAPI.packages.discoverManagers) {
+    console.warn('discoverPackageManagers: API not available')
+    return []
+  }
+
+  return window.electronAPI.packages.discoverManagers()
+}
+
+/**
+ * List packages by manager (enhanced)
+ */
+export async function listPackagesByManager(manager: string): Promise<PackageInfo[]> {
+  if (!isElectron()) {
+    console.warn('listPackagesByManager: Not running in Electron environment')
+    return []
+  }
+
+  if (!window.electronAPI.packages.listByManager) {
+    console.warn('listPackagesByManager: API not available')
+    return []
+  }
+
+  return window.electronAPI.packages.listByManager(manager)
+}
+
+/**
+ * Uninstall a package with enhanced manager support
+ */
+export async function uninstallEnhancedPackage(
+  name: string,
+  manager: string,
+  options?: { cask?: boolean }
+): Promise<{ success: boolean; error?: string }> {
+  if (!isElectron()) {
+    console.warn('uninstallEnhancedPackage: Not running in Electron environment')
+    return { success: false, error: 'Not running in Electron environment' }
+  }
+
+  if (!window.electronAPI.packages.uninstallEnhanced) {
+    console.warn('uninstallEnhancedPackage: API not available')
+    return { success: false, error: 'API not available' }
+  }
+
+  return window.electronAPI.packages.uninstallEnhanced(name, manager, options)
 }
 
 /**
@@ -315,7 +370,10 @@ export const ipcClient = {
     listNpm: listNpmPackages,
     listPip: listPipPackages,
     listComposer: listComposerPackages,
+    discoverManagers: discoverPackageManagers,
+    listByManager: listPackagesByManager,
     uninstall: uninstallPackage,
+    uninstallEnhanced: uninstallEnhancedPackage,
   },
 
   // Services

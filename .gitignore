@@ -43,3 +43,4 @@ release/
 # Test output
 *-test-result.json
 test-result.json
+.ace-tool/

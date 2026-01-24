@@ -35,6 +35,7 @@ interface AppState {
   npmPackages: PackageInfo[]
   pipPackages: PackageInfo[]
   composerPackages: PackageInfo[]
+  brewPackages: PackageInfo[]
   packagesLoading: boolean
   packagesError: string | null
   
@@ -63,7 +64,7 @@ interface AppState {
   
   // Actions - Data Loading
   loadTools: () => Promise<void>
-  loadPackages: (manager?: 'npm' | 'pip' | 'composer' | 'all') => Promise<void>
+  loadPackages: (manager?: 'npm' | 'pip' | 'composer' | 'brew' | 'all') => Promise<void>
   loadServices: () => Promise<void>
   loadServicesSilently: () => Promise<void>
   loadEnvironment: () => Promise<void>
@@ -87,6 +88,7 @@ interface AppState {
   setNpmPackages: (packages: PackageInfo[]) => void
   setPipPackages: (packages: PackageInfo[]) => void
   setComposerPackages: (packages: PackageInfo[]) => void
+  setBrewPackages: (packages: PackageInfo[]) => void
   setPackagesLoading: (loading: boolean) => void
   setPackagesError: (error: string | null) => void
   setPackageVersionCache: (cache: Record<string, VersionInfo>) => void
@@ -128,6 +130,7 @@ export const useAppStore = create<AppState>()(
       npmPackages: [],
       pipPackages: [],
       composerPackages: [],
+      brewPackages: [],
       packagesLoading: false,
       packagesError: null,
       
@@ -196,6 +199,11 @@ export const useAppStore = create<AppState>()(
           if (manager === 'all' || manager === 'composer') {
             const composerPackages = await ipcClient.packages.listComposer()
             set({ composerPackages: validatePackageArray(composerPackages, 'composer') })
+          }
+
+          if (manager === 'all' || manager === 'brew') {
+            const brewPackages = await ipcClient.packages.listByManager('brew')
+            set({ brewPackages: validatePackageArray(brewPackages, 'brew') })
           }
           
           set({ packagesLoading: false })
@@ -377,6 +385,7 @@ export const useAppStore = create<AppState>()(
       setNpmPackages: (packages: PackageInfo[]) => set({ npmPackages: validatePackageArray(packages, 'npm') }),
       setPipPackages: (packages: PackageInfo[]) => set({ pipPackages: validatePackageArray(packages, 'pip') }),
       setComposerPackages: (packages: PackageInfo[]) => set({ composerPackages: validatePackageArray(packages, 'composer') }),
+      setBrewPackages: (packages: PackageInfo[]) => set({ brewPackages: validatePackageArray(packages, 'brew') }),
       setPackagesLoading: (loading: boolean) => set({ packagesLoading: loading }),
       setPackagesError: (error: string | null) => set({ packagesError: error }),
       setPackageVersionCache: (cache: Record<string, VersionInfo>) => set({ packageVersionCache: cache }),

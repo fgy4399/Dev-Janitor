@@ -145,7 +145,7 @@ interface ElectronAPI {
 
   // Shell API (for opening paths, URLs, and executing commands)
   shell: {
-    openPath: (path: string) => Promise<string>
+    openPath: (path: string) => Promise<void>
     openExternal: (url: string) => Promise<void>
     executeCommand: (command: string) => Promise<{ success: boolean; stdout: string; stderr: string }>
   }
@@ -352,8 +352,14 @@ function createElectronAPI(): ElectronAPI {
       listComposer: () => ipcRenderer.invoke('packages:list-composer'),
       listCargo: () => ipcRenderer.invoke('packages:list-cargo'),
       listGem: () => ipcRenderer.invoke('packages:list-gem'),
-      uninstall: (name: string, manager: string) => 
-        ipcRenderer.invoke('packages:uninstall', name, manager),
+      uninstall: async (name: string, manager: string) => {
+        const result = await ipcRenderer.invoke('packages:uninstall', name, manager)
+        if (typeof result === 'boolean') return result
+        if (result && typeof result === 'object' && 'success' in (result as Record<string, unknown>)) {
+          return Boolean((result as { success?: unknown }).success)
+        }
+        return false
+      },
       update: (name: string, manager: string) =>
         ipcRenderer.invoke('packages:update', name, manager),
       checkNpmLatestVersion: (packageName: string) =>
@@ -433,7 +439,12 @@ function createElectronAPI(): ElectronAPI {
 
     // Shell API
     shell: {
-      openPath: (path: string) => ipcRenderer.invoke('shell:open-path', path),
+      openPath: async (path: string) => {
+        const result = await ipcRenderer.invoke('shell:open-path', path)
+        if (typeof result === 'string' && result.trim() !== '') {
+          throw new Error(result)
+        }
+      },
       openExternal: (url: string) => ipcRenderer.invoke('shell:open-external', url),
       executeCommand: (command: string) => ipcRenderer.invoke('shell:execute-command', command),
     },

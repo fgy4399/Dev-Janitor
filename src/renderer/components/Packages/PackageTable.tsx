@@ -31,22 +31,25 @@ const { Text, Paragraph } = Typography
 export interface PackageTableProps {
   packages: PackageInfo[]
   loading: boolean
-  onUninstall: (packageName: string) => void
   onRefresh: () => void
-  manager: 'npm' | 'pip' | 'composer'
+  manager: 'npm' | 'pip' | 'composer' | 'brew'
 }
 
 /**
  * Get external link URL for package based on manager
  */
-const getPackageUrl = (packageName: string, manager: 'npm' | 'pip' | 'composer'): string => {
-  switch (manager) {
+const getPackageUrl = (pkg: PackageInfo): string => {
+  switch (pkg.manager) {
     case 'npm':
-      return `https://www.npmjs.com/package/${packageName}`
+      return `https://www.npmjs.com/package/${pkg.name}`
     case 'pip':
-      return `https://pypi.org/project/${packageName}`
+      return `https://pypi.org/project/${pkg.name}`
     case 'composer':
-      return `https://packagist.org/packages/${packageName}`
+      return `https://packagist.org/packages/${pkg.name}`
+    case 'brew':
+      return pkg.location === 'cask'
+        ? `https://formulae.brew.sh/cask/${pkg.name}`
+        : `https://formulae.brew.sh/formula/${pkg.name}`
     default:
       return ''
   }
@@ -196,28 +199,46 @@ const PackageTable: React.FC<PackageTableProps> = ({
   }, [manager, t, onRefresh, checkVersion, updatePackageVersionInfo])
 
   // Handle package uninstallation
-  const handleUninstallPackage = useCallback(async (packageName: string) => {
+  const handleUninstallPackage = useCallback(async (pkg: PackageInfo) => {
     if (!window.electronAPI?.packages?.uninstall) {
       message.error(t('packages.uninstallFailed', 'Uninstall failed'))
       return
     }
 
-    setUninstallingPackages(prev => new Set(prev).add(packageName))
+    setUninstallingPackages(prev => new Set(prev).add(pkg.name))
     try {
-      const success = await window.electronAPI.packages.uninstall(packageName, manager)
+      if (manager === 'brew') {
+        if (!window.electronAPI?.packages?.uninstallEnhanced) {
+          message.error(t('packages.uninstallFailed', 'Uninstall failed'))
+          return
+        }
+
+        const result = await window.electronAPI.packages.uninstallEnhanced(pkg.name, manager, { cask: pkg.location === 'cask' })
+        if (result.success) {
+          message.success(t('packages.uninstallSuccess', 'Package uninstalled successfully'))
+          onRefresh()
+        } else {
+          message.error(result.error || t('packages.uninstallFailed', 'Uninstall failed'))
+        }
+
+        return
+      }
+
+      const success = await window.electronAPI.packages.uninstall(pkg.name, manager)
       if (success) {
         message.success(t('packages.uninstallSuccess', 'Package uninstalled successfully'))
         onRefresh()
-      } else {
-        message.error(t('packages.uninstallFailed', 'Uninstall failed'))
+        return
       }
+
+      message.error(t('packages.uninstallFailed', 'Uninstall failed'))
     } catch (error) {
-      console.error(`Failed to uninstall package ${packageName}:`, error)
+      console.error(`Failed to uninstall package ${pkg.name}:`, error)
       message.error(t('packages.uninstallFailed', 'Uninstall failed'))
     } finally {
       setUninstallingPackages(prev => {
         const next = new Set(prev)
-        next.delete(packageName)
+        next.delete(pkg.name)
         return next
       })
     }
@@ -281,10 +302,10 @@ const PackageTable: React.FC<PackageTableProps> = ({
       dataIndex: 'name',
       key: 'name',
       sorter: (a, b) => a.name.localeCompare(b.name),
-      render: (name) => (
+      render: (name, record) => (
         <Space>
           <Text strong className="font-mono">{name}</Text>
-          <Button type="text" size="small" icon={<LinkOutlined />} onClick={() => window.open(getPackageUrl(name, manager), '_blank')} />
+          <Button type="text" size="small" icon={<LinkOutlined />} onClick={() => window.open(getPackageUrl(record), '_blank')} />
         </Space>
       ),
     },
@@ -348,10 +369,10 @@ const PackageTable: React.FC<PackageTableProps> = ({
 
         // Uninstall button - always shown
         const uninstallButton = (
-          <Popconfirm
-            title={t('packages.confirmUninstall', 'Confirm uninstall')}
-            description={t('packages.confirmUninstallDesc', `Are you sure you want to uninstall ${record.name}?`)}
-            onConfirm={() => handleUninstallPackage(record.name)}
+            <Popconfirm
+              title={t('packages.confirmUninstall', 'Confirm uninstall')}
+              description={t('packages.confirmUninstallDesc', `Are you sure you want to uninstall ${record.name}?`)}
+            onConfirm={() => handleUninstallPackage(record)}
             okText={t('common.confirm', 'Yes')}
             cancelText={t('common.cancel', 'No')}
             okButtonProps={{ danger: true }}

@@ -140,14 +140,11 @@ const AICLIView: React.FC = () => {
 
   const handleOpenConfig = async (configPath: string) => {
     if (window.electronAPI?.shell?.openPath) {
-      // Expand ~ or %USERPROFILE%
-      let expandedPath = configPath
-      if (configPath.startsWith('~')) {
-        expandedPath = configPath.replace('~', process.env.HOME || '')
-      } else if (configPath.includes('%USERPROFILE%')) {
-        expandedPath = configPath.replace('%USERPROFILE%', process.env.USERPROFILE || '')
+      try {
+        await window.electronAPI.shell.openPath(configPath)
+      } catch (error) {
+        message.error((error as Error)?.message || t('aiCli.openConfigFailed'))
       }
-      await window.electronAPI.shell.openPath(expandedPath)
     }
   }
 

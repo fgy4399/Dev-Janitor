@@ -120,6 +120,7 @@
     "npm": "NPM Packages",
     "pip": "Python Packages",
     "composer": "Composer Packages",
+    "brew": "Homebrew Packages",
     "name": "Name",
     "version": "Version",
     "versionStatus": "Version Status",
@@ -391,7 +392,8 @@
     "uninstallFailed": "Failed to uninstall AI CLI tool",
     "uninstallConfirm": "Are you sure you want to uninstall {{name}}?",
     "openHomepage": "Open Homepage",
-    "openConfig": "Open Config Folder"
+    "openConfig": "Open Config Folder",
+    "openConfigFailed": "Failed to open config folder"
   },
   "cacheCleaner": {
     "title": "Cache Cleaner",
