@@ -118,19 +118,25 @@ const PackageTable: React.FC<PackageTableProps> = ({
       })
   }, [t])
 
-  const handleCopyUpdateCommand = useCallback((packageName: string) => {
+  const handleCopyUpdateCommand = useCallback((pkg: PackageInfo) => {
     let command = ''
     switch (manager) {
       case 'npm':
-        command = `npm update -g ${packageName}`
+        command = `npm update -g ${pkg.name}`
         break
       case 'pip':
-        command = `pip install --upgrade ${packageName}`
+        command = `pip install --upgrade ${pkg.name}`
         break
       case 'composer':
-        command = `composer global update ${packageName}`
+        command = `composer global update ${pkg.name}`
+        break
+      case 'brew':
+        command = pkg.location === 'cask'
+          ? `brew upgrade --cask ${pkg.name}`
+          : `brew upgrade ${pkg.name}`
         break
     }
+    if (!command) return
     navigator.clipboard.writeText(command)
       .then(() => {
         message.success(t('notifications.copySuccess', 'Copied to clipboard'))
@@ -140,12 +146,14 @@ const PackageTable: React.FC<PackageTableProps> = ({
       })
   }, [manager, t])
 
-  const checkVersion = useCallback(async (packageName: string) => {
-    if (manager !== 'npm' && manager !== 'pip') return;
+  const checkVersion = useCallback(async (pkg: PackageInfo) => {
+    if (manager !== 'npm' && manager !== 'pip' && manager !== 'brew') return;
+
+    const cacheKey = `${manager}:${pkg.name}`
 
     if (!window.electronAPI?.packages) {
       console.error('Packages API not available')
-      updatePackageVersionInfo(`${manager}:${packageName}`, {
+      updatePackageVersionInfo(cacheKey, {
         latest: t('packages.checkFailed', 'Check failed'),
         checking: false,
         checked: true
@@ -153,48 +161,106 @@ const PackageTable: React.FC<PackageTableProps> = ({
       return
     }
 
-    updatePackageVersionInfo(`${manager}:${packageName}`, { latest: '', checking: true, checked: false })
+    updatePackageVersionInfo(cacheKey, { latest: '', checking: true, checked: false })
 
     try {
-      const result = manager === 'npm'
-        ? await window.electronAPI.packages.checkNpmLatestVersion(packageName)
-        : await window.electronAPI.packages.checkPipLatestVersion(packageName);
+      if (manager === 'brew') {
+        if (!window.electronAPI.packages.checkBrewOutdated) {
+          updatePackageVersionInfo(cacheKey, {
+            latest: t('packages.checkFailed', 'Check failed'),
+            checking: false,
+            checked: true
+          })
+          return
+        }
 
-      updatePackageVersionInfo(`${manager}:${packageName}`, {
+        const result = await window.electronAPI.packages.checkBrewOutdated(pkg.name, { cask: pkg.location === 'cask' })
+        if (!result.success) {
+          updatePackageVersionInfo(cacheKey, {
+            latest: result.error || t('packages.checkFailed', 'Check failed'),
+            checking: false,
+            checked: true
+          })
+          return
+        }
+
+        const location = pkg.location === 'cask' ? 'cask' : 'formula'
+        const entry = result.packages.find(p => p.name === pkg.name && p.location === location)
+
+        updatePackageVersionInfo(cacheKey, {
+          latest: entry?.currentVersion || pkg.version || t('common.unknown'),
+          checking: false,
+          checked: true
+        })
+        return
+      }
+
+      const result = manager === 'npm'
+        ? await window.electronAPI.packages.checkNpmLatestVersion(pkg.name)
+        : await window.electronAPI.packages.checkPipLatestVersion(pkg.name)
+
+      updatePackageVersionInfo(cacheKey, {
         latest: result?.latest || t('common.unknown'),
         checking: false,
         checked: true
       })
     } catch (error) {
-      console.error(`Failed to check version for ${packageName}:`, error)
-      updatePackageVersionInfo(`${manager}:${packageName}`, { latest: 'error', checking: false, checked: true })
+      console.error(`Failed to check version for ${pkg.name}:`, error)
+      updatePackageVersionInfo(cacheKey, { latest: 'error', checking: false, checked: true })
     }
   }, [manager, t, updatePackageVersionInfo])
 
 
-  const handleUpdatePackage = useCallback(async (packageName: string) => {
-    if (manager !== 'npm' && manager !== 'pip') return;
+  const handleUpdatePackage = useCallback(async (pkg: PackageInfo) => {
+    if (manager !== 'npm' && manager !== 'pip' && manager !== 'brew') return;
+
+    const cacheKey = `${manager}:${pkg.name}`
+
+    if (manager === 'brew') {
+      if (!window.electronAPI?.packages?.upgradeBrew) {
+        message.error(t('packages.updateFailed'))
+        return
+      }
+
+      updatePackageVersionInfo(cacheKey, { updating: true })
+      try {
+        const result = await window.electronAPI.packages.upgradeBrew(pkg.name, { cask: pkg.location === 'cask' })
+        if (result.success) {
+          message.success(t('packages.updateSuccess'))
+          onRefresh()
+          updatePackageVersionInfo(cacheKey, { latest: '', checked: false })
+        } else {
+          message.error(result.error || t('packages.updateFailed'))
+        }
+      } catch (error) {
+        console.error(`Failed to update package ${pkg.name}:`, error)
+        message.error(t('packages.updateFailed'))
+      } finally {
+        updatePackageVersionInfo(cacheKey, { updating: false })
+      }
+      return
+    }
 
     if (!window.electronAPI?.packages?.update) {
       message.error(t('packages.updateFailed'))
       return
     }
 
-    updatePackageVersionInfo(`${manager}:${packageName}`, { updating: true })
+    updatePackageVersionInfo(cacheKey, { updating: true })
     try {
-      const result = await window.electronAPI.packages.update(packageName, manager)
+      const result = await window.electronAPI.packages.update(pkg.name, manager)
       if (result.success) {
         message.success(t('packages.updateSuccess'))
         onRefresh()
-        await checkVersion(packageName)
+        await checkVersion(pkg)
       } else {
         message.error(result.error || t('packages.updateFailed'))
       }
     } catch (error) {
-      console.error(`Failed to update package ${packageName}:`, error)
+      console.error(`Failed to update package ${pkg.name}:`, error)
       message.error(t('packages.updateFailed'))
     } finally {
-      updatePackageVersionInfo(`${manager}:${packageName}`, { updating: false })
+      updatePackageVersionInfo(cacheKey, { updating: false })
     }
   }, [manager, t, onRefresh, checkVersion, updatePackageVersionInfo])
 
@@ -245,13 +311,68 @@ const PackageTable: React.FC<PackageTableProps> = ({
   }, [manager, t, onRefresh])
 
   const checkAllVersions = useCallback(async () => {
-    if (manager !== 'npm' && manager !== 'pip') return;
+    if (manager !== 'npm' && manager !== 'pip' && manager !== 'brew') return;
 
     abortControllerRef.current = new AbortController();
     const signal = abortControllerRef.current.signal;
 
     setCheckingAll(true);
     setCheckProgress({ total: packages.length, completed: 0, cancelled: false });
+
+    if (manager === 'brew') {
+      if (!window.electronAPI?.packages?.checkBrewOutdated) {
+        message.error(t('packages.checkFailed', 'Check failed'))
+        setCheckingAll(false)
+        setCheckProgress(null)
+        return
+      }
+
+      try {
+        const result = await window.electronAPI.packages.checkBrewOutdated()
+        if (!result.success) {
+          message.error(result.error || t('packages.checkFailed', 'Check failed'))
+          return
+        }
+
+        const outdated = new Map<string, string>()
+        for (const entry of result.packages) {
+          outdated.set(`${entry.location}:${entry.name}`, entry.currentVersion)
+        }
+
+        let completedCount = 0
+        for (const pkg of packages) {
+          if (signal.aborted) break
+          const location = pkg.location === 'cask' ? 'cask' : 'formula'
+          const latest = outdated.get(`${location}:${pkg.name}`) || pkg.version || t('common.unknown')
+          updatePackageVersionInfo(`${manager}:${pkg.name}`, {
+            latest,
+            checking: false,
+            checked: true,
+          })
+          completedCount++
+          if (!signal.aborted) {
+            setCheckProgress(prev => prev ? { ...prev, completed: completedCount } : null)
+          }
+        }
+      } catch (error) {
+        console.error('Failed to check Homebrew outdated packages:', error)
+        message.error(t('packages.checkFailed', 'Check failed'))
+      } finally {
+        if (!signal.aborted) {
+          setCheckingAll(false)
+          setTimeout(() => {
+            if (!signal.aborted) {
+              setCheckProgress(null)
+            }
+          }, 2000)
+        } else {
+          setCheckingAll(false)
+          setCheckProgress(prev => prev ? { ...prev, cancelled: true } : null)
+        }
+      }
+
+      return
+    }
 
     const CONCURRENCY_LIMIT = 5;
     const queue = [...packages];
@@ -262,7 +383,7 @@ const PackageTable: React.FC<PackageTableProps> = ({
         const pkg = queue.shift();
         if (!pkg) break;
         try {
-          await checkVersion(pkg.name);
+          await checkVersion(pkg);
           await new Promise(resolve => setTimeout(resolve, 100));
         } finally {
           completedCount++;
@@ -294,7 +415,7 @@ const PackageTable: React.FC<PackageTableProps> = ({
         setCheckProgress(prev => prev ? { ...prev, cancelled: true } : null);
       }
     }
-  }, [manager, packages, checkVersion]);
+  }, [manager, packages, checkVersion, t, updatePackageVersionInfo]);
 
   const columns: ColumnsType<PackageInfo> = [
     {
@@ -316,8 +437,12 @@ const PackageTable: React.FC<PackageTableProps> = ({
       render: (_, record) => {
         const info = packageVersionCache[`${manager}:${record.name}`]
         const comparison = memoizedVersionComparison[record.name];
-        const hasUpdate = comparison !== undefined && comparison < 0;
-        const isLatest = comparison !== undefined && comparison >= 0;
+        const hasUpdate = manager === 'brew'
+          ? Boolean(info?.checked && info.latest && info.latest !== record.version)
+          : (comparison !== undefined && comparison < 0);
+        const isLatest = manager === 'brew'
+          ? Boolean(info?.checked && (!info.latest || info.latest === record.version))
+          : (comparison !== undefined && comparison >= 0);
 
         return (
           <Space size="small" wrap>
@@ -330,7 +455,7 @@ const PackageTable: React.FC<PackageTableProps> = ({
                     color="orange" 
                     className="font-mono m-0 cursor-pointer" 
                     icon={<ArrowUpOutlined />} 
-                    onClick={() => handleCopyUpdateCommand(record.name)}
+                    onClick={() => handleCopyUpdateCommand(record)}
                   >
                     {info.latest}
                   </Tag>
@@ -389,19 +514,23 @@ const PackageTable: React.FC<PackageTableProps> = ({
           </Popconfirm>
         )
 
-        // For non npm/pip managers, only show uninstall button
-        if (manager !== 'npm' && manager !== 'pip') {
+        // For managers without update-check support, only show uninstall button
+        if (manager !== 'npm' && manager !== 'pip' && manager !== 'brew') {
           return uninstallButton;
         }
 
+        const hasUpdate = manager === 'brew'
+          ? Boolean(info?.checked && info.latest && info.latest !== record.version)
+          : (info?.checked && comparison < 0)
+
         // Has update available - show update button and uninstall button
-        if (info?.checked && comparison < 0) {
+        if (hasUpdate) {
           return (
             <Space size="small">
               <Button
                 type="primary" size="small" ghost
                 icon={info.updating ? <LoadingOutlined /> : <DownloadOutlined />}
-                onClick={() => handleUpdatePackage(record.name)}
+                onClick={() => handleUpdatePackage(record)}
                 disabled={info.updating}
               >
                 {info.updating ? t('packages.updating') : t('packages.update')}
@@ -417,7 +546,7 @@ const PackageTable: React.FC<PackageTableProps> = ({
             <Button
               type="link" size="small"
               icon={info?.checking ? <LoadingOutlined /> : <SyncOutlined />}
-              onClick={() => checkVersion(record.name)}
+              onClick={() => checkVersion(record)}
               disabled={info?.checking}
             >
               {info?.checking ? "" : t('packages.checkUpdate')}
@@ -431,7 +560,7 @@ const PackageTable: React.FC<PackageTableProps> = ({
 
   return (
     <div className="package-table">
-      {(manager === 'npm' || manager === 'pip') && (
+      {(manager === 'npm' || manager === 'pip' || manager === 'brew') && (
         <div style={{ marginBottom: 16 }}>
           <Space>
             <Button 

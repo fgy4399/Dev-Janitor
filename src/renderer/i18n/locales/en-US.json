@@ -143,7 +143,7 @@
     "viewOnNpm": "View on npm",
     "viewOnPypi": "View on PyPI",
     "viewOnPackagist": "View on Packagist",
-    "versionCheckNotSupported": "Version check only supports npm and pip",
+    "versionCheckNotSupported": "Version check supports npm, pip, and Homebrew",
     "versionCheckComplete": "Version check complete",
     "checkFailed": "Check failed",
     "checking": "Checking...",
@@ -156,7 +156,7 @@
     "updating": "Updating...",
     "updateSuccess": "Package updated successfully",
     "updateFailed": "Failed to update package",
-    "updateNotSupported": "Update only supports npm and pip",
+    "updateNotSupported": "Update supports npm, pip, and Homebrew",
     "clickToUpdate": "Click to update"
   },
   "services": {

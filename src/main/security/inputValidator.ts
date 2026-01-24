@@ -70,6 +70,13 @@ export const PIP_PACKAGE_PATTERN =
   /^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$/;
 
 /**
+ * Homebrew 包名正则表达式
+ * 允许常见的 formula/cask 名称格式（例如 python@3.11、icu4c@78、ca-certificates）
+ */
+export const BREW_PACKAGE_PATTERN =
+  /^[a-zA-Z0-9][a-zA-Z0-9@._+-]*$/;
+
+/**
  * 路径遍历检测模式
  */
 export const PATH_TRAVERSAL_PATTERN = /\.\./;
@@ -129,9 +136,17 @@ export class InputValidator implements IInputValidator {
       };
     }
 
+    // 检查是否符合 Homebrew 包名格式（brew formula/cask）
+    if (BREW_PACKAGE_PATTERN.test(trimmedName)) {
+      return {
+        valid: true,
+        value: trimmedName,
+      };
+    }
+
     return {
       valid: false,
-      error: '无效的包名格式。包名必须符合 npm 或 pip 包名规范',
+      error: '无效的包名格式。包名必须符合 npm、pip 或 Homebrew 包名规范',
     };
   }
 

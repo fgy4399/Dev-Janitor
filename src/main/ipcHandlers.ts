@@ -19,7 +19,7 @@ import { packageManager, PackageDiscovery } from './packageManager'
 import { serviceMonitor } from './serviceMonitor'
 import { environmentScanner } from './environmentScanner'
 import { aiAssistant } from './aiAssistant'
-import { commandExecutor } from './commandExecutor'
+import { commandExecutor, TimeoutPreset } from './commandExecutor'
 import { cacheScanner } from './cacheScanner'
 import { aiCleanupScanner } from './aiCleanupScanner'
 import { commandValidator, inputValidator, validateIPCSender } from './security'
@@ -363,6 +363,159 @@ function registerPackagesHandlers(): void {
       return null
     }
   })
+
+  // Check outdated Homebrew packages via `brew outdated --json=v2`
+  ipcMain.handle(
+    'packages:check-brew-outdated',
+    async (
+      _event,
+      packageName?: string,
+      options?: { cask?: boolean }
+    ): Promise<{
+      success: boolean
+      packages: Array<{
+        name: string
+        installedVersions: string[]
+        currentVersion: string
+        pinned: boolean
+        location: 'formula' | 'cask'
+      }>
+      error?: string
+    }> => {
+      try {
+        const discovery = getPackageDiscovery()
+        const status = await discovery.getManagerStatus('brew')
+
+        if (status.status === 'not_installed') {
+          return { success: false, packages: [], error: 'Homebrew is not installed' }
+        }
+
+        const brewExecutable = status.foundPath ? `"${status.foundPath}"` : 'brew'
+
+        let command = `${brewExecutable} outdated --json=v2`
+
+        if (packageName) {
+          const nameValidation = inputValidator.validatePackageName(packageName)
+          if (!nameValidation.valid) {
+            return { success: false, packages: [], error: nameValidation.error }
+          }
+
+          const modeFlag = options?.cask ? '--cask' : '--formula'
+          command = `${brewExecutable} outdated ${modeFlag} --json=v2 ${nameValidation.value!}`
+        }
+
+        const result = await commandExecutor.execute(command, { timeout: TimeoutPreset.SLOW })
+        const stdout = result.stdout?.trim()
+
+        if (!stdout) {
+          return { success: false, packages: [], error: result.stderr || 'No output from brew' }
+        }
+
+        const parsed = JSON.parse(stdout) as {
+          formulae?: Array<{
+            name?: unknown
+            installed_versions?: unknown
+            current_version?: unknown
+            pinned?: unknown
+          }>
+          casks?: Array<{
+            name?: unknown
+            installed_versions?: unknown
+            current_version?: unknown
+            pinned?: unknown
+          }>
+        }
+
+        const packages: Array<{
+          name: string
+          installedVersions: string[]
+          currentVersion: string
+          pinned: boolean
+          location: 'formula' | 'cask'
+        }> = []
+
+        const pushEntries = (entries: unknown, location: 'formula' | 'cask') => {
+          if (!Array.isArray(entries)) return
+          for (const entry of entries) {
+            if (!entry || typeof entry !== 'object') continue
+            const record = entry as Record<string, unknown>
+            const name = typeof record.name === 'string' ? record.name : null
+            if (!name) continue
+
+            const installedVersions = Array.isArray(record.installed_versions)
+              ? (record.installed_versions.filter(v => typeof v === 'string') as string[])
+              : []
+            const currentVersion = typeof record.current_version === 'string' ? record.current_version : ''
+            const pinned = Boolean(record.pinned)
+
+            packages.push({
+              name,
+              installedVersions,
+              currentVersion,
+              pinned,
+              location,
+            })
+          }
+        }
+
+        pushEntries(parsed.formulae, 'formula')
+        pushEntries(parsed.casks, 'cask')
+
+        return { success: true, packages }
+      } catch (error) {
+        console.error('Error checking Homebrew outdated packages:', error)
+        return {
+          success: false,
+          packages: [],
+          error: error instanceof Error ? error.message : 'Unknown error',
+        }
+      }
+    }
+  )
+
+  // Upgrade a Homebrew package (formula or cask)
+  ipcMain.handle(
+    'packages:upgrade-brew',
+    async (
+      event,
+      packageName: string,
+      options?: { cask?: boolean }
+    ): Promise<{ success: boolean; error?: string }> => {
+      try {
+        if (!validateIPCSender(event)) {
+          console.warn('Security warning: IPC message from untrusted sender for packages:upgrade-brew')
+          return { success: false, error: 'Untrusted sender' }
+        }
+
+        const nameValidation = inputValidator.validatePackageName(packageName)
+        if (!nameValidation.valid) {
+          return { success: false, error: nameValidation.error }
+        }
+
+        const discovery = getPackageDiscovery()
+        const status = await discovery.getManagerStatus('brew')
+
+        if (status.status === 'not_installed') {
+          return { success: false, error: 'Homebrew is not installed' }
+        }
+
+        const brewExecutable = status.foundPath ? `"${status.foundPath}"` : 'brew'
+        const command = options?.cask
+          ? `${brewExecutable} upgrade --cask ${nameValidation.value!}`
+          : `${brewExecutable} upgrade ${nameValidation.value!}`
+
+        const result = await commandExecutor.execute(command, { timeout: TimeoutPreset.EXTENDED })
+        if (result.success) {
+          return { success: true }
+        }
+
+        return { success: false, error: result.stderr || 'Upgrade failed' }
+      } catch (error) {
+        console.error(`Error upgrading Homebrew package ${packageName}:`, error)
+        return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
+      }
+    }
+  )
 
   // Update a package to the latest version
   ipcMain.handle('packages:update', async (_event, name: string, manager: string): Promise<{ success: boolean; newVersion?: string; error?: string }> => {
@@ -1129,6 +1282,8 @@ export function cleanupIPCHandlers(): void {
   ipcMain.removeHandler('packages:update')
   ipcMain.removeHandler('packages:check-npm-latest')
   ipcMain.removeHandler('packages:check-pip-latest')
+  ipcMain.removeHandler('packages:check-brew-outdated')
+  ipcMain.removeHandler('packages:upgrade-brew')
   ipcMain.removeHandler('services:list')
   ipcMain.removeHandler('services:kill')
   ipcMain.removeHandler('env:get-all')

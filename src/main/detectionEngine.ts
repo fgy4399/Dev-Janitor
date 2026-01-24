@@ -1087,7 +1087,7 @@ export class DetectionEngine {
         description: 'Open source AI coding agent by SST',
         homepage: 'https://opencode.ai',
         provider: 'sst',
-        configPath: isWindows() ? '%USERPROFILE%\\.opencode' : '~/.opencode',
+        configPath: isWindows() ? '%USERPROFILE%\\.config\\opencode' : '~/.config/opencode',
       },
       {
         name: 'iflow',

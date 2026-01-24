@@ -105,6 +105,21 @@ interface ElectronAPI {
     update: (name: string, manager: string) => Promise<{ success: boolean; newVersion?: string; error?: string }>
     checkNpmLatestVersion: (packageName: string) => Promise<{ name: string; latest: string; current?: string } | null>
     checkPipLatestVersion: (packageName: string) => Promise<{ name: string; latest: string } | null>
+    checkBrewOutdated: (
+      packageName?: string,
+      options?: { cask?: boolean }
+    ) => Promise<{
+      success: boolean
+      packages: Array<{
+        name: string
+        installedVersions: string[]
+        currentVersion: string
+        pinned: boolean
+        location: 'formula' | 'cask'
+      }>
+      error?: string
+    }>
+    upgradeBrew: (packageName: string, options?: { cask?: boolean }) => Promise<{ success: boolean; error?: string }>
     // Enhanced Package Discovery API
     discoverManagers: () => Promise<PackageManagerStatus[]>
     getManagerStatus: (manager: string) => Promise<PackageManagerStatus | null>
@@ -239,6 +254,8 @@ function createDegradedAPI(): ElectronAPI {
       update: createDegradedPromise,
       checkNpmLatestVersion: createDegradedPromise,
       checkPipLatestVersion: createDegradedPromise,
+      checkBrewOutdated: createDegradedPromise,
+      upgradeBrew: createDegradedPromise,
       discoverManagers: createDegradedPromise,
       getManagerStatus: createDegradedPromise,
       listByManager: createDegradedPromise,
@@ -366,6 +383,10 @@ function createElectronAPI(): ElectronAPI {
         ipcRenderer.invoke('packages:check-npm-latest', packageName),
       checkPipLatestVersion: (packageName: string) =>
         ipcRenderer.invoke('packages:check-pip-latest', packageName),
+      checkBrewOutdated: (packageName?: string, options?: { cask?: boolean }) =>
+        ipcRenderer.invoke('packages:check-brew-outdated', packageName, options),
+      upgradeBrew: (packageName: string, options?: { cask?: boolean }) =>
+        ipcRenderer.invoke('packages:upgrade-brew', packageName, options),
       // Enhanced Package Discovery API
       discoverManagers: () => ipcRenderer.invoke('packages:discover-managers'),
       getManagerStatus: (manager: string) => ipcRenderer.invoke('packages:get-manager-status', manager),

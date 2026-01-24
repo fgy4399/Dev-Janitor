@@ -143,7 +143,7 @@
     "viewOnNpm": "在 npm 上查看",
     "viewOnPypi": "在 PyPI 上查看",
     "viewOnPackagist": "在 Packagist 上查看",
-    "versionCheckNotSupported": "版本检查仅支持 npm 和 pip",
+    "versionCheckNotSupported": "版本检查支持 npm、pip 和 Homebrew",
     "versionCheckComplete": "版本检查完成",
     "checkFailed": "检查失败",
     "checking": "检查中...",
@@ -156,7 +156,7 @@
     "updating": "更新中...",
     "updateSuccess": "包更新成功",
     "updateFailed": "包更新失败",
-    "updateNotSupported": "更新功能仅支持 npm 和 pip",
+    "updateNotSupported": "更新功能支持 npm、pip 和 Homebrew",
     "clickToUpdate": "点击更新"
   },
   "services": {
