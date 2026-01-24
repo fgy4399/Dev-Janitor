@@ -75,6 +75,8 @@ const VERSION_LIKE_PATTERN = /\d+\.\d+/
 
 const isVersionLike = (value: string): boolean => VERSION_LIKE_PATTERN.test(value)
 
+const getPackageKey = (manager: string, pkg: PackageInfo): string => `${manager}:${pkg.location}:${pkg.name}`
+
 const PackageTable: React.FC<PackageTableProps> = ({
   packages,
   loading,
@@ -99,10 +101,10 @@ const PackageTable: React.FC<PackageTableProps> = ({
   // Memoize version comparison results
   const memoizedVersionComparison = useMemo(() => {
     return packages.reduce<Record<string, number>>((acc, pkg) => {
-      const cacheKey = `${manager}:${pkg.name}`
+      const cacheKey = getPackageKey(manager, pkg)
       const cached = packageVersionCache[cacheKey]
       if (cached?.checked && cached.latest && isVersionLike(cached.latest)) {
-        acc[pkg.name] = compareVersions(pkg.version, cached.latest)
+        acc[cacheKey] = compareVersions(pkg.version, cached.latest)
       }
       return acc;
     }, {});
@@ -149,7 +151,7 @@ const PackageTable: React.FC<PackageTableProps> = ({
   const checkVersion = useCallback(async (pkg: PackageInfo) => {
     if (manager !== 'npm' && manager !== 'pip' && manager !== 'brew') return;
 
-    const cacheKey = `${manager}:${pkg.name}`
+    const cacheKey = getPackageKey(manager, pkg)
 
     if (!window.electronAPI?.packages) {
       console.error('Packages API not available')
@@ -214,7 +216,7 @@ const PackageTable: React.FC<PackageTableProps> = ({
   const handleUpdatePackage = useCallback(async (pkg: PackageInfo) => {
     if (manager !== 'npm' && manager !== 'pip' && manager !== 'brew') return;
 
-    const cacheKey = `${manager}:${pkg.name}`
+    const cacheKey = getPackageKey(manager, pkg)
 
     if (manager === 'brew') {
       if (!window.electronAPI?.packages?.upgradeBrew) {
@@ -266,12 +268,13 @@ const PackageTable: React.FC<PackageTableProps> = ({
 
   // Handle package uninstallation
   const handleUninstallPackage = useCallback(async (pkg: PackageInfo) => {
+    const uninstallKey = getPackageKey(manager, pkg)
     if (!window.electronAPI?.packages?.uninstall) {
       message.error(t('packages.uninstallFailed', 'Uninstall failed'))
       return
     }
 
-    setUninstallingPackages(prev => new Set(prev).add(pkg.name))
+    setUninstallingPackages(prev => new Set(prev).add(uninstallKey))
     try {
       if (manager === 'brew') {
         if (!window.electronAPI?.packages?.uninstallEnhanced) {
@@ -304,7 +307,7 @@ const PackageTable: React.FC<PackageTableProps> = ({
     } finally {
       setUninstallingPackages(prev => {
         const next = new Set(prev)
-        next.delete(pkg.name)
+        next.delete(uninstallKey)
         return next
       })
     }
@@ -344,7 +347,7 @@ const PackageTable: React.FC<PackageTableProps> = ({
           if (signal.aborted) break
           const location = pkg.location === 'cask' ? 'cask' : 'formula'
           const latest = outdated.get(`${location}:${pkg.name}`) || pkg.version || t('common.unknown')
-          updatePackageVersionInfo(`${manager}:${pkg.name}`, {
+          updatePackageVersionInfo(getPackageKey(manager, pkg), {
             latest,
             checking: false,
             checked: true,
@@ -435,8 +438,9 @@ const PackageTable: React.FC<PackageTableProps> = ({
       key: 'version',
       width: 250,
       render: (_, record) => {
-        const info = packageVersionCache[`${manager}:${record.name}`]
-        const comparison = memoizedVersionComparison[record.name];
+        const cacheKey = getPackageKey(manager, record)
+        const info = packageVersionCache[cacheKey]
+        const comparison = memoizedVersionComparison[cacheKey];
         const hasUpdate = manager === 'brew'
           ? Boolean(info?.checked && info.latest && info.latest !== record.version)
           : (comparison !== undefined && comparison < 0);
@@ -488,9 +492,10 @@ const PackageTable: React.FC<PackageTableProps> = ({
       width: 200,
       align: 'right',
       render: (_, record) => {
-        const info = packageVersionCache[`${manager}:${record.name}`]
-        const isUninstalling = uninstallingPackages.has(record.name)
-        const comparison = memoizedVersionComparison[record.name] ?? 0;
+        const cacheKey = getPackageKey(manager, record)
+        const info = packageVersionCache[cacheKey]
+        const isUninstalling = uninstallingPackages.has(cacheKey)
+        const comparison = memoizedVersionComparison[cacheKey] ?? 0;
 
         // Uninstall button - always shown
         const uninstallButton = (
@@ -593,7 +598,7 @@ const PackageTable: React.FC<PackageTableProps> = ({
         columns={columns} 
         dataSource={packages} 
         loading={loading} 
-        rowKey="name" 
+        rowKey={(record) => getPackageKey(manager, record)} 
         size="middle" 
         pagination={{ pageSize: 20, showSizeChanger: true }} 
       />
