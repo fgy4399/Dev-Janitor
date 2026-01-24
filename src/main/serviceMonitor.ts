@@ -124,6 +124,8 @@ export function parseLsofLine(line: string): { port: number; pid: number; name: 
 // Cache for process info with LRU eviction (max 1000 entries, 5 min expiration)
 const processInfoCache = new BoundedLRUCache<number, { name: string; command: string }>(1000, 300000)
 
+type ProcessMetrics = { cpu?: number; memory?: number }
+
 /**
  * Get process information by PID on Unix using ps
  * 
@@ -146,6 +148,53 @@ async function getUnixProcessInfo(pid: number): Promise<{ name: string; command:
   const command = output
   
   return { name, command }
+}
+
+function parseTasklistMemoryMB(raw: string): number | null {
+  if (!raw) return null
+  const kbValue = parseInt(raw.replace(/[^\d]/g, ''), 10)
+  if (Number.isNaN(kbValue)) return null
+  return kbValue / 1024
+}
+
+function parsePsMetricsLine(line: string): { pid: number; cpu?: number; memory?: number } | null {
+  const trimmed = line.trim()
+  if (!trimmed) return null
+  const parts = trimmed.split(/\s+/)
+  if (parts.length < 3) return null
+
+  const pid = parseInt(parts[0], 10)
+  if (Number.isNaN(pid)) return null
+
+  const cpu = parseFloat(parts[1])
+  const rssKb = parseInt(parts[2], 10)
+
+  const metrics: ProcessMetrics = {}
+  if (!Number.isNaN(cpu)) metrics.cpu = cpu
+  if (!Number.isNaN(rssKb)) metrics.memory = rssKb / 1024
+
+  if (metrics.cpu === undefined && metrics.memory === undefined) return null
+  return { pid, ...metrics }
+}
+
+async function getUnixProcessMetrics(pids: number[]): Promise<Map<number, ProcessMetrics>> {
+  const metricsByPid = new Map<number, ProcessMetrics>()
+  const uniquePids = Array.from(new Set(pids.filter(pid => Number.isInteger(pid) && pid > 0)))
+  if (uniquePids.length === 0) return metricsByPid
+
+  const result = await executeSafe(`ps -p ${uniquePids.join(',')} -o pid=,pcpu=,rss=`)
+  if (!result.success || !result.stdout) return metricsByPid
+
+  for (const line of result.stdout.split('\n')) {
+    const parsed = parsePsMetricsLine(line)
+    if (!parsed) continue
+    metricsByPid.set(parsed.pid, {
+      cpu: parsed.cpu,
+      memory: parsed.memory,
+    })
+  }
+
+  return metricsByPid
 }
 
 /**
@@ -193,17 +242,22 @@ async function listWindowsServices(): Promise<RunningService[]> {
   // Get all process names at once using tasklist (much faster than individual calls)
   const tasklistResult = await executeSafe('tasklist /FO CSV /NH')
   const processNameMap = new Map<number, string>()
+  const processMetricsMap = new Map<number, ProcessMetrics>()
   
   if (tasklistResult.success && tasklistResult.stdout) {
     const taskLines = tasklistResult.stdout.split('\n')
     for (const taskLine of taskLines) {
       // Format: "process.exe","12345","Console","1","12,345 K"
-      const match = taskLine.match(/"([^"]+)","(\d+)"/)
+      const match = taskLine.match(/"([^"]+)","(\d+)","[^"]*","[^"]*","([^"]+)"/)
       if (match) {
         const name = match[1]
         const pid = parseInt(match[2], 10)
         if (pids.includes(pid)) {
           processNameMap.set(pid, name)
+          const memory = parseTasklistMemoryMB(match[3])
+          if (memory !== null) {
+            processMetricsMap.set(pid, { memory })
+          }
         }
       }
     }
@@ -212,6 +266,7 @@ async function listWindowsServices(): Promise<RunningService[]> {
   // Build services list (skip wmic calls for better performance)
   for (const [pid, ports] of pidPorts) {
     const name = processNameMap.get(pid)
+    const metrics = processMetricsMap.get(pid)
     if (name) {
       // Update cache (timestamp handled internally by BoundedLRUCache)
       processInfoCache.set(pid, {
@@ -225,6 +280,8 @@ async function listWindowsServices(): Promise<RunningService[]> {
           name,
           port,
           command: name,
+          cpu: metrics?.cpu,
+          memory: metrics?.memory,
         })
       }
     }
@@ -251,12 +308,22 @@ async function listUnixServices(): Promise<RunningService[]> {
     // Try alternative: ss command on Linux
     const ssResult = await executeSafe('ss -tlnp')
     if (ssResult.success && ssResult.stdout) {
-      return parseSSOutput(ssResult.stdout)
+      const ssServices = parseSSOutput(ssResult.stdout)
+      const metricsByPid = await getUnixProcessMetrics(ssServices.map(s => s.pid))
+      return ssServices.map(service => {
+        const metrics = metricsByPid.get(service.pid)
+        return {
+          ...service,
+          cpu: metrics?.cpu,
+          memory: metrics?.memory,
+        }
+      })
     }
     return services
   }
   
   const lines = lsofResult.stdout.split('\n')
+  const entries: Array<{ pid: number; port: number; name: string }> = []
   
   for (const line of lines) {
     const parsed = parseLsofLine(line)
@@ -271,18 +338,37 @@ async function listUnixServices(): Promise<RunningService[]> {
     }
     seen.add(key)
     
+    entries.push(parsed)
+  }
+
+  const metricsByPid = await getUnixProcessMetrics(entries.map(entry => entry.pid))
+
+  for (const entry of entries) {
     // Get full process info
-    let processInfo = processInfoByPid.get(parsed.pid)
-    if (!processInfoByPid.has(parsed.pid)) {
-      processInfo = await getUnixProcessInfo(parsed.pid)
-      processInfoByPid.set(parsed.pid, processInfo)
+    let processInfo = processInfoByPid.get(entry.pid)
+    if (!processInfoByPid.has(entry.pid)) {
+      const cached = processInfoCache.get(entry.pid)
+      if (cached) {
+        processInfo = cached
+        processInfoByPid.set(entry.pid, cached)
+      } else {
+        processInfo = await getUnixProcessInfo(entry.pid)
+        processInfoByPid.set(entry.pid, processInfo)
+        if (processInfo) {
+          processInfoCache.set(entry.pid, processInfo)
+        }
+      }
     }
+
+    const metrics = metricsByPid.get(entry.pid)
     
     services.push({
-      pid: parsed.pid,
-      name: parsed.name,
-      port: parsed.port,
-      command: processInfo?.command || parsed.name,
+      pid: entry.pid,
+      name: entry.name,
+      port: entry.port,
+      command: processInfo?.command || entry.name,
+      cpu: metrics?.cpu,
+      memory: metrics?.memory,
     })
   }
   
