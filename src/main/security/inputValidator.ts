@@ -6,6 +6,9 @@
  * @see Requirements 2.1, 2.2, 2.3, 2.4, 2.5
  */
 
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+
 /**
  * 验证结果泛型接口
  */
@@ -16,6 +19,17 @@ export interface ValidationResult<T> {
   value?: T;
   /** 错误信息（仅当验证失败时） */
   error?: string;
+}
+
+export interface ResolvedPathInfo {
+  originalPath: string;
+  resolvedPath: string;
+  realPath: string;
+}
+
+export interface ResolvedPathOptions {
+  allowedRoots?: string[];
+  mustExist?: boolean;
 }
 
 /**
@@ -49,6 +63,14 @@ export interface IInputValidator {
   validatePath(path: string): ValidationResult<string>;
 
   /**
+   * 解析并校验真实路径。
+   * @param targetPath - 待校验路径
+   * @param options - 允许根目录和存在性要求
+   * @returns 真实路径信息
+   */
+  validateResolvedPath(targetPath: string, options?: ResolvedPathOptions): Promise<ValidationResult<ResolvedPathInfo>>;
+
+  /**
    * 验证包管理器类型
    * @param manager - 包管理器名称
    * @returns 验证结果
@@ -80,6 +102,11 @@ export const BREW_PACKAGE_PATTERN =
  * 路径遍历检测模式
  */
 export const PATH_TRAVERSAL_PATTERN = /\.\./;
+
+/**
+ * Windows 设备路径和 UNC 路径前缀。
+ */
+export const WINDOWS_DEVICE_PATH_PATTERN = /^(\\\\[.?]\\|\\\\[^\\]+\\[^\\]+)/;
 
 /**
  * 有效的包管理器列表
@@ -226,6 +253,20 @@ export class InputValidator implements IInputValidator {
 
     const trimmedPath = path.trim();
 
+    if (trimmedPath.includes('\0')) {
+      return {
+        valid: false,
+        error: '路径包含空字节',
+      };
+    }
+
+    if (WINDOWS_DEVICE_PATH_PATTERN.test(trimmedPath)) {
+      return {
+        valid: false,
+        error: '路径包含不支持的 Windows 设备或 UNC 前缀',
+      };
+    }
+
     // 检测路径遍历模式
     if (PATH_TRAVERSAL_PATTERN.test(trimmedPath)) {
       return {
@@ -237,6 +278,73 @@ export class InputValidator implements IInputValidator {
     return {
       valid: true,
       value: trimmedPath,
+    };
+  }
+
+  /**
+   * 解析并校验真实路径。
+   */
+  async validateResolvedPath(
+    targetPath: string,
+    options: ResolvedPathOptions = {}
+  ): Promise<ValidationResult<ResolvedPathInfo>> {
+    const rawValidation = this.validatePath(targetPath);
+    if (!rawValidation.valid) {
+      return {
+        valid: false,
+        error: rawValidation.error,
+      };
+    }
+
+    const resolvedPath = path.resolve(rawValidation.value!);
+    let realPath = resolvedPath;
+
+    if (options.mustExist !== false) {
+      try {
+        realPath = await fs.realpath(resolvedPath);
+      } catch (error) {
+        return {
+          valid: false,
+          error: `路径不存在或无法访问: ${error instanceof Error ? error.message : '未知错误'}`,
+        };
+      }
+    }
+
+    if (options.allowedRoots && options.allowedRoots.length > 0) {
+      const rootResults = await Promise.all(
+        options.allowedRoots.map(async (root) => {
+          const rootValidation = this.validatePath(root);
+          if (!rootValidation.valid) return null;
+
+          const resolvedRoot = path.resolve(rootValidation.value!);
+          try {
+            return await fs.realpath(resolvedRoot);
+          } catch {
+            return resolvedRoot;
+          }
+        })
+      );
+
+      const normalizedTarget = normalizePathForCompare(realPath);
+      const isAllowed = rootResults
+        .filter((root): root is string => typeof root === 'string' && root.length > 0)
+        .some((root) => isPathInsideOrEqual(normalizedTarget, normalizePathForCompare(root)));
+
+      if (!isAllowed) {
+        return {
+          valid: false,
+          error: '路径不在允许的目录范围内',
+        };
+      }
+    }
+
+    return {
+      valid: true,
+      value: {
+        originalPath: rawValidation.value!,
+        resolvedPath,
+        realPath,
+      },
     };
   }
 
@@ -276,3 +384,17 @@ export class InputValidator implements IInputValidator {
 
 // 导出默认实例
 export const inputValidator = new InputValidator();
+
+function normalizePathForCompare(targetPath: string): string {
+  const normalized = path.resolve(targetPath);
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function isPathInsideOrEqual(targetPath: string, rootPath: string): boolean {
+  if (targetPath === rootPath) return true;
+
+  const relativePath = path.relative(rootPath, targetPath);
+  return Boolean(relativePath) &&
+    !relativePath.startsWith('..') &&
+    !path.isAbsolute(relativePath);
+}

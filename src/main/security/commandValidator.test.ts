@@ -21,6 +21,8 @@ describe('CommandValidator', () => {
         const result = validator.validateCommand('npm install lodash');
         expect(result.valid).toBe(true);
         expect(result.sanitizedCommand).toBe('npm install lodash');
+        expect(result.command).toBe('npm');
+        expect(result.args).toEqual(['install', 'lodash']);
       });
 
       it('should accept npx commands', () => {
@@ -120,6 +122,38 @@ describe('CommandValidator', () => {
         expect(result.valid).toBe(true);
         expect(result.sanitizedCommand).toBe('npm install lodash');
       });
+    });
+  });
+
+  describe('validateCommandParts', () => {
+    it('should accept allowed command and args', () => {
+      const result = validator.validateCommandParts('npm', ['install', 'lodash']);
+
+      expect(result.valid).toBe(true);
+      expect(result.command).toBe('npm');
+      expect(result.args).toEqual(['install', 'lodash']);
+      expect(result.sanitizedCommand).toBe('npm install lodash');
+    });
+
+    it('should reject command not in whitelist', () => {
+      const result = validator.validateCommandParts('rm', ['-rf', '/']);
+
+      expect(result.valid).toBe(false);
+      expect(result.error).toContain('命令不在允许列表中');
+    });
+
+    it('should reject dangerous args before execution', () => {
+      const result = validator.validateCommandParts('npm', ['install', 'lodash;rm']);
+
+      expect(result.valid).toBe(false);
+      expect(result.error).toContain('不安全字符');
+    });
+
+    it('should reject non-array args', () => {
+      const result = validator.validateCommandParts('npm', 'install' as unknown as string[]);
+
+      expect(result.valid).toBe(false);
+      expect(result.error).toContain('数组');
     });
   });
 

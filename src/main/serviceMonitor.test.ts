@@ -16,6 +16,8 @@ import fc from 'fast-check'
 import {
   parseNetstatLine,
   parseLsofLine,
+  parseTasklistMemoryMB,
+  parsePsMetricsLine,
   COMMON_DEV_PORTS,
   filterDevServices,
   ServiceMonitor,
@@ -101,6 +103,34 @@ describe('ServiceMonitor', () => {
     it('should return null for malformed lines', () => {
       const line = 'node LISTEN'
       expect(parseLsofLine(line)).toBeNull()
+    })
+  })
+
+  describe('process metrics parsing', () => {
+    it('should parse tasklist memory in MB', () => {
+      expect(parseTasklistMemoryMB('12,288 K')).toBe(12)
+      expect(parseTasklistMemoryMB('1,536 K')).toBe(1.5)
+    })
+
+    it('should reject invalid tasklist memory', () => {
+      expect(parseTasklistMemoryMB('')).toBeNull()
+      expect(parseTasklistMemoryMB('not available')).toBeNull()
+    })
+
+    it('should parse ps CPU and RSS memory metrics', () => {
+      const result = parsePsMetricsLine('12345  3.5  20480')
+
+      expect(result).toEqual({
+        pid: 12345,
+        cpu: 3.5,
+        memory: 20,
+      })
+    })
+
+    it('should reject malformed ps metric lines', () => {
+      expect(parsePsMetricsLine('')).toBeNull()
+      expect(parsePsMetricsLine('abc 1.0 1024')).toBeNull()
+      expect(parsePsMetricsLine('12345')).toBeNull()
     })
   })
   

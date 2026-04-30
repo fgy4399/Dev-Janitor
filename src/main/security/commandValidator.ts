@@ -15,6 +15,10 @@ export interface CommandValidationResult {
   valid: boolean;
   /** 清理后的命令（仅当验证通过时） */
   sanitizedCommand?: string;
+  /** 命令名（仅当验证通过时） */
+  command?: string;
+  /** 参数数组（仅当验证通过时） */
+  args?: string[];
   /** 错误信息（仅当验证失败时） */
   error?: string;
 }
@@ -29,6 +33,14 @@ export interface ICommandValidator {
    * @returns 验证结果
    */
   validateCommand(command: string): CommandValidationResult;
+
+  /**
+   * 验证命令名和参数数组。
+   * @param command - 命令名
+   * @param args - 参数数组
+   * @returns 验证结果
+   */
+  validateCommandParts(command: string, args: string[]): CommandValidationResult;
 
   /**
    * 检查输入是否包含危险字符
@@ -109,11 +121,28 @@ export class CommandValidator implements ICommandValidator {
       };
     }
 
-    // 提取基础命令（第一个单词）
     const parts = trimmedCommand.split(/\s+/);
     const baseCommand = parts[0];
+    const args = parts.slice(1);
 
-    // 检查基础命令是否在白名单中
+    return this.validateCommandParts(baseCommand, args);
+  }
+
+  /**
+   * 验证命令名和参数数组。
+   *
+   * 新代码应优先使用这个接口，并配合 execFile 执行，避免 shell 字符串解析。
+   */
+  validateCommandParts(command: string, args: string[]): CommandValidationResult {
+    if (!command || typeof command !== 'string' || command.trim() === '') {
+      return {
+        valid: false,
+        error: '命令不能为空',
+      };
+    }
+
+    const baseCommand = command.trim();
+
     if (!ALLOWED_COMMANDS.includes(baseCommand)) {
       return {
         valid: false,
@@ -121,22 +150,43 @@ export class CommandValidator implements ICommandValidator {
       };
     }
 
-    // 检查整个命令是否包含危险字符
-    if (this.containsDangerousChars(trimmedCommand)) {
+    if (!Array.isArray(args)) {
       return {
         valid: false,
-        error: '命令包含不安全字符',
+        error: '命令参数必须是数组',
       };
     }
 
-    // 对参数进行转义处理
-    const args = parts.slice(1);
-    const escapedArgs = args.map((arg) => this.escapeArgument(arg));
-    const sanitizedCommand = [baseCommand, ...escapedArgs].join(' ');
+    for (const arg of args) {
+      if (typeof arg !== 'string') {
+        return {
+          valid: false,
+          error: '命令参数必须是字符串',
+        };
+      }
+
+      if (arg.trim() === '') {
+        return {
+          valid: false,
+          error: '命令参数不能为空',
+        };
+      }
+
+      if (this.containsDangerousChars(arg)) {
+        return {
+          valid: false,
+          error: '命令参数包含不安全字符',
+        };
+      }
+    }
+
+    const sanitizedArgs = args.map(arg => arg.trim());
 
     return {
       valid: true,
-      sanitizedCommand,
+      sanitizedCommand: [baseCommand, ...sanitizedArgs].join(' '),
+      command: baseCommand,
+      args: sanitizedArgs,
     };
   }
 

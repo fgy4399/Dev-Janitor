@@ -14,7 +14,7 @@
 import { RunningService } from '../shared/types'
 import {
   isWindows,
-  executeSafe,
+  executeFileSafe,
 } from './commandExecutor'
 import { BoundedLRUCache, CLEANUP_INTERVAL } from './utils/cacheManager'
 
@@ -126,6 +126,17 @@ const processInfoCache = new BoundedLRUCache<number, { name: string; command: st
 
 type ProcessMetrics = { cpu?: number; memory?: number }
 
+function getValidPid(pid: number): string | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null
+  return String(pid)
+}
+
+function getValidPidList(pids: number[]): string | null {
+  const uniquePids = Array.from(new Set(pids.filter(pid => Number.isInteger(pid) && pid > 0)))
+  if (uniquePids.length === 0) return null
+  return uniquePids.join(',')
+}
+
 /**
  * Get process information by PID on Unix using ps
  * 
@@ -133,7 +144,10 @@ type ProcessMetrics = { cpu?: number; memory?: number }
  * @returns Promise resolving to process info or null
  */
 async function getUnixProcessInfo(pid: number): Promise<{ name: string; command: string } | null> {
-  const result = await executeSafe(`ps -p ${pid} -o comm=,args=`)
+  const validPid = getValidPid(pid)
+  if (!validPid) return null
+
+  const result = await executeFileSafe('ps', ['-p', validPid, '-o', 'comm=,args='])
   
   if (!result.success || !result.stdout) {
     return null
@@ -150,14 +164,14 @@ async function getUnixProcessInfo(pid: number): Promise<{ name: string; command:
   return { name, command }
 }
 
-function parseTasklistMemoryMB(raw: string): number | null {
+export function parseTasklistMemoryMB(raw: string): number | null {
   if (!raw) return null
   const kbValue = parseInt(raw.replace(/[^\d]/g, ''), 10)
   if (Number.isNaN(kbValue)) return null
   return kbValue / 1024
 }
 
-function parsePsMetricsLine(line: string): { pid: number; cpu?: number; memory?: number } | null {
+export function parsePsMetricsLine(line: string): { pid: number; cpu?: number; memory?: number } | null {
   const trimmed = line.trim()
   if (!trimmed) return null
   const parts = trimmed.split(/\s+/)
@@ -179,10 +193,10 @@ function parsePsMetricsLine(line: string): { pid: number; cpu?: number; memory?:
 
 async function getUnixProcessMetrics(pids: number[]): Promise<Map<number, ProcessMetrics>> {
   const metricsByPid = new Map<number, ProcessMetrics>()
-  const uniquePids = Array.from(new Set(pids.filter(pid => Number.isInteger(pid) && pid > 0)))
-  if (uniquePids.length === 0) return metricsByPid
+  const pidList = getValidPidList(pids)
+  if (!pidList) return metricsByPid
 
-  const result = await executeSafe(`ps -p ${uniquePids.join(',')} -o pid=,pcpu=,rss=`)
+  const result = await executeFileSafe('ps', ['-p', pidList, '-o', 'pid=,pcpu=,rss='])
   if (!result.success || !result.stdout) return metricsByPid
 
   for (const line of result.stdout.split('\n')) {
@@ -209,7 +223,7 @@ async function listWindowsServices(): Promise<RunningService[]> {
   const pidPorts = new Map<number, Set<number>>()
   
   // Get listening ports with PIDs
-  const netstatResult = await executeSafe('netstat -ano -p TCP')
+  const netstatResult = await executeFileSafe('netstat', ['-ano', '-p', 'TCP'])
   
   if (!netstatResult.success) {
     return services
@@ -240,7 +254,7 @@ async function listWindowsServices(): Promise<RunningService[]> {
   if (pids.length === 0) return services
   
   // Get all process names at once using tasklist (much faster than individual calls)
-  const tasklistResult = await executeSafe('tasklist /FO CSV /NH')
+  const tasklistResult = await executeFileSafe('tasklist', ['/FO', 'CSV', '/NH'])
   const processNameMap = new Map<number, string>()
   const processMetricsMap = new Map<number, ProcessMetrics>()
   
@@ -302,11 +316,11 @@ async function listUnixServices(): Promise<RunningService[]> {
   const processInfoByPid = new Map<number, { name: string; command: string } | null>()
   
   // Get listening ports with process info
-  const lsofResult = await executeSafe('lsof -i -P -n | grep LISTEN')
+  const lsofResult = await executeFileSafe('lsof', ['-i', '-P', '-n'])
   
   if (!lsofResult.success && !lsofResult.stdout) {
     // Try alternative: ss command on Linux
-    const ssResult = await executeSafe('ss -tlnp')
+    const ssResult = await executeFileSafe('ss', ['-tlnp'])
     if (ssResult.success && ssResult.stdout) {
       const ssServices = parseSSOutput(ssResult.stdout)
       const metricsByPid = await getUnixProcessMetrics(ssServices.map(s => s.pid))
@@ -453,7 +467,7 @@ export async function findServiceByPort(port: number): Promise<RunningService | 
  * @returns Promise resolving to true if successful
  */
 export async function killService(pid: number): Promise<boolean> {
-  if (pid <= 0) {
+  if (!Number.isInteger(pid) || pid <= 0) {
     return false
   }
   
@@ -466,10 +480,10 @@ export async function killService(pid: number): Promise<boolean> {
   
   if (isWindows()) {
     // Windows: use taskkill
-    result = await executeSafe(`taskkill /PID ${pid} /F`)
+    result = await executeFileSafe('taskkill', ['/PID', String(pid), '/F'])
   } else {
     // Unix: use kill
-    result = await executeSafe(`kill -9 ${pid}`)
+    result = await executeFileSafe('kill', ['-9', String(pid)])
   }
   
   return result.success

@@ -23,7 +23,7 @@ import { commandExecutor, TimeoutPreset } from './commandExecutor'
 import { cacheScanner } from './cacheScanner'
 import { aiCleanupScanner } from './aiCleanupScanner'
 import { commandValidator, inputValidator, validateIPCSender } from './security'
-import type { ToolInfo, PackageInfo, RunningService, EnvironmentVariable, AnalysisResult, AIConfig, AICLITool, CacheScanResult, CleanResult, AICleanupScanResult, AICleanupResult, PackageManagerStatus } from '../shared/types'
+import type { ToolInfo, PackageInfo, RunningService, EnvironmentVariable, AnalysisResult, AIConfig, AICLITool, CacheScanResult, CleanResult, AICleanupScanResult, AICleanupResult, PackageManagerStatus, PackageManagerType } from '../shared/types'
 
 // Store for language preference
 let currentLanguage = 'en-US'
@@ -51,6 +51,52 @@ function getPackageDiscovery(): PackageDiscovery {
     packageDiscovery = new PackageDiscovery()
   }
   return packageDiscovery
+}
+
+function isPackageManagerType(manager: string): manager is PackageManagerType {
+  return getPackageDiscovery().getRegisteredManagers().includes(manager as PackageManagerType)
+}
+
+function getValidPackageManager(manager: string): PackageManagerType | null {
+  if (typeof manager !== 'string' || !isPackageManagerType(manager)) {
+    return null
+  }
+  return manager
+}
+
+async function fetchJsonWithTimeout<T>(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs = 10000
+): Promise<{ ok: true; data: T } | { ok: false; status?: number; error: string }> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const headers = new Headers(options.headers)
+    if (!headers.has('Accept')) {
+      headers.set('Accept', 'application/json')
+    }
+
+    const response = await fetch(url, {
+      ...options,
+      headers,
+      signal: controller.signal,
+    })
+
+    if (!response.ok) {
+      return { ok: false, status: response.status, error: response.statusText }
+    }
+
+    return { ok: true, data: await response.json() as T }
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : 'Unknown network error',
+    }
+  } finally {
+    clearTimeout(timeoutId)
+  }
 }
 
 /**
@@ -221,8 +267,13 @@ function registerPackagesHandlers(): void {
   // Validates: Requirements 14.5, 14.6
   ipcMain.handle('packages:get-manager-status', async (_event, manager: string): Promise<PackageManagerStatus | null> => {
     try {
+      const validManager = getValidPackageManager(manager)
+      if (!validManager) {
+        return null
+      }
+
       const discovery = getPackageDiscovery()
-      const status = await discovery.getManagerStatus(manager as any)
+      const status = await discovery.getManagerStatus(validManager)
       return status
     } catch (error) {
       console.error(`Error getting status for ${manager}:`, error)
@@ -233,8 +284,13 @@ function registerPackagesHandlers(): void {
   // Enhanced Package Discovery: List packages from a specific manager
   ipcMain.handle('packages:list-by-manager', async (_event, manager: string): Promise<PackageInfo[]> => {
     try {
+      const validManager = getValidPackageManager(manager)
+      if (!validManager) {
+        return []
+      }
+
       const discovery = getPackageDiscovery()
-      const packages = await discovery.listPackages(manager as any)
+      const packages = await discovery.listPackages(validManager)
       return packages
     } catch (error) {
       console.error(`Error listing packages for ${manager}:`, error)
@@ -275,7 +331,12 @@ function registerPackagesHandlers(): void {
       }
 
       const discovery = getPackageDiscovery()
-      const success = await discovery.uninstallPackage(nameValidation.value!, manager as any, options)
+      const validManager = getValidPackageManager(manager)
+      if (!validManager) {
+        return { success: false, error: `Invalid package manager: ${manager}` }
+      }
+
+      const success = await discovery.uninstallPackage(nameValidation.value!, validManager, options)
       return { success }
     } catch (error) {
       console.error(`Error uninstalling package ${name}:`, error)
@@ -313,23 +374,17 @@ function registerPackagesHandlers(): void {
   // Check npm package latest version from registry
   ipcMain.handle('packages:check-npm-latest', async (_event, packageName: string): Promise<{ name: string; latest: string } | null> => {
     try {
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+      const result = await fetchJsonWithTimeout<{ version?: string }>(
+        `https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`
+      )
 
-      const response = await fetch(`https://registry.npmjs.org/${packageName}/latest`, {
-        headers: { 'Accept': 'application/json' },
-        signal: controller.signal
-      })
-
-      clearTimeout(timeoutId)
-
-      if (!response.ok) {
+      if (!result.ok || typeof result.data.version !== 'string') {
         return null
       }
-      const data = await response.json()
+
       return {
         name: packageName,
-        latest: data.version
+        latest: result.data.version
       }
     } catch (error) {
       console.error(`Error checking latest version for ${packageName}:`, error)
@@ -340,23 +395,17 @@ function registerPackagesHandlers(): void {
   // Check pip package latest version from PyPI
   ipcMain.handle('packages:check-pip-latest', async (_event, packageName: string): Promise<{ name: string; latest: string } | null> => {
     try {
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+      const result = await fetchJsonWithTimeout<{ info?: { version?: string } }>(
+        `https://pypi.org/pypi/${encodeURIComponent(packageName)}/json`
+      )
 
-      const response = await fetch(`https://pypi.org/pypi/${packageName}/json`, {
-        headers: { 'Accept': 'application/json' },
-        signal: controller.signal
-      })
-
-      clearTimeout(timeoutId)
-
-      if (!response.ok) {
+      if (!result.ok || typeof result.data.info?.version !== 'string') {
         return null
       }
-      const data = await response.json()
+
       return {
         name: packageName,
-        latest: data.info?.version || null
+        latest: result.data.info.version
       }
     } catch (error) {
       console.error(`Error checking latest version for ${packageName}:`, error)
@@ -390,9 +439,8 @@ function registerPackagesHandlers(): void {
           return { success: false, packages: [], error: 'Homebrew is not installed' }
         }
 
-        const brewExecutable = status.foundPath ? `"${status.foundPath}"` : 'brew'
-
-        let command = `${brewExecutable} outdated --json=v2`
+        const brewExecutable = status.foundPath || 'brew'
+        const args = ['outdated', '--json=v2']
 
         if (packageName) {
           const nameValidation = inputValidator.validatePackageName(packageName)
@@ -401,10 +449,11 @@ function registerPackagesHandlers(): void {
           }
 
           const modeFlag = options?.cask ? '--cask' : '--formula'
-          command = `${brewExecutable} outdated ${modeFlag} --json=v2 ${nameValidation.value!}`
+          args.splice(1, 0, modeFlag)
+          args.push(nameValidation.value!)
         }
 
-        const result = await commandExecutor.execute(command, { timeout: TimeoutPreset.SLOW })
+        const result = await commandExecutor.executeFile(brewExecutable, args, { timeout: TimeoutPreset.SLOW })
         const stdout = result.stdout?.trim()
 
         if (!stdout) {
@@ -499,12 +548,12 @@ function registerPackagesHandlers(): void {
           return { success: false, error: 'Homebrew is not installed' }
         }
 
-        const brewExecutable = status.foundPath ? `"${status.foundPath}"` : 'brew'
-        const command = options?.cask
-          ? `${brewExecutable} upgrade --cask ${nameValidation.value!}`
-          : `${brewExecutable} upgrade ${nameValidation.value!}`
+        const brewExecutable = status.foundPath || 'brew'
+        const args = options?.cask
+          ? ['upgrade', '--cask', nameValidation.value!]
+          : ['upgrade', nameValidation.value!]
 
-        const result = await commandExecutor.execute(command, { timeout: TimeoutPreset.EXTENDED })
+        const result = await commandExecutor.executeFile(brewExecutable, args, { timeout: TimeoutPreset.EXTENDED })
         if (result.success) {
           return { success: true }
         }
@@ -910,7 +959,11 @@ function registerShellHandlers(): void {
         return { success: false, stdout: '', stderr: validationResult.error! };
       }
 
-      const result = await commandExecutor.execute(validationResult.sanitizedCommand!, { timeout: 60000 }) // 60 second timeout
+      const result = await commandExecutor.executeFile(
+        validationResult.command!,
+        validationResult.args || [],
+        { timeout: 60000 }
+      )
       return {
         success: result.success,
         stdout: result.stdout,

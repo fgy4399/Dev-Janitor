@@ -6,6 +6,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   InputValidator,
   NPM_PACKAGE_PATTERN,
@@ -309,11 +312,65 @@ describe('InputValidator', () => {
         expect(result.error).toContain('不能为空');
       });
 
+      it('should reject null bytes', () => {
+        const result = validator.validatePath('/tmp/file\0.txt');
+        expect(result.valid).toBe(false);
+        expect(result.error).toContain('空字节');
+      });
+
+      it('should reject Windows device paths', () => {
+        const result = validator.validatePath('\\\\?\\C:\\Users\\file.txt');
+        expect(result.valid).toBe(false);
+        expect(result.error).toContain('Windows');
+      });
+
       it('should trim whitespace from valid paths', () => {
         const result = validator.validatePath('  /home/user/file.txt  ');
         expect(result.valid).toBe(true);
         expect(result.value).toBe('/home/user/file.txt');
       });
+    });
+  });
+
+  describe('validateResolvedPath', () => {
+    it('should resolve an existing path inside allowed root', async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dev-janitor-path-'));
+      const child = path.join(root, 'child');
+      await fs.mkdir(child);
+
+      const result = await validator.validateResolvedPath(child, {
+        allowedRoots: [root],
+      });
+
+      expect(result.valid).toBe(true);
+      expect(result.value?.realPath).toBe(await fs.realpath(child));
+
+      await fs.rm(root, { recursive: true, force: true });
+    });
+
+    it('should reject existing path outside allowed root', async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dev-janitor-root-'));
+      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'dev-janitor-outside-'));
+
+      const result = await validator.validateResolvedPath(outside, {
+        allowedRoots: [root],
+      });
+
+      expect(result.valid).toBe(false);
+      expect(result.error).toContain('允许的目录');
+
+      await fs.rm(root, { recursive: true, force: true });
+      await fs.rm(outside, { recursive: true, force: true });
+    });
+
+    it('should reject missing path when existence is required', async () => {
+      const result = await validator.validateResolvedPath(
+        path.join(os.tmpdir(), 'dev-janitor-missing-path'),
+        { mustExist: true }
+      );
+
+      expect(result.valid).toBe(false);
+      expect(result.error).toContain('不存在');
     });
   });
 

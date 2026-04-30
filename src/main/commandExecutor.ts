@@ -10,7 +10,8 @@
  * Validates: Requirements 12.4, 12.5, 12.6, 1.1, 1.2, 1.4, 6.1
  */
 
-import { exec, ExecOptions } from 'child_process'
+import { exec, execFile, ExecOptions } from 'child_process'
+import type { ExecFileOptions } from 'child_process'
 import { promisify } from 'util'
 import { CommandResult } from '../shared/types'
 import fs from 'node:fs'
@@ -18,6 +19,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 const execAsync = promisify(exec)
+const execFileAsync = promisify(execFile)
 
 function prependUniquePathEntries(currentPath: string | undefined, entriesToPrepend: string[]): string {
   const separator = isWindows() ? ';' : ':'
@@ -295,6 +297,17 @@ export interface ExecutorOptions extends ExecOptions {
 }
 
 /**
+ * 参数数组式命令执行选项。
+ *
+ * 不经过 shell 解析，适合所有由业务代码构造的命令。
+ */
+export interface ExecutorFileOptions extends ExecFileOptions {
+  timeout?: number
+  /** Use auto-detected timeout based on command type */
+  autoTimeout?: boolean
+}
+
+/**
  * Extended command result with additional metadata
  * Validates: Requirement 6.1
  */
@@ -444,6 +457,76 @@ export async function execute(
   }
 }
 
+function getExitCode(code: number | string | undefined): number {
+  return typeof code === 'number' ? code : 1
+}
+
+function getCommandLabel(command: string, args: string[]): string {
+  return [command, ...args].join(' ')
+}
+
+/**
+ * Execute a command without shell interpolation.
+ *
+ * Prefer this for new code paths. Arguments are passed as an array and are not
+ * interpreted by a shell, which removes command injection primitives such as
+ * pipes, redirects, command substitution, and variable expansion.
+ */
+export async function executeFileCommand(
+  command: string,
+  args: string[] = [],
+  options: ExecutorFileOptions = {}
+): Promise<CommandResult> {
+  const commandLabel = getCommandLabel(command, args)
+  const timeout = options.autoTimeout
+    ? getTimeoutForCommand(commandLabel)
+    : (options.timeout ?? DEFAULT_TIMEOUT)
+
+  try {
+    const env = buildCommandEnv(options.env)
+    const { stdout, stderr } = await execFileAsync(command, args, {
+      ...options,
+      env,
+      timeout,
+      windowsHide: true,
+      encoding: 'utf8',
+      shell: false,
+    })
+
+    return {
+      stdout: (stdout as string) || '',
+      stderr: (stderr as string) || '',
+      exitCode: 0,
+      success: true,
+    }
+  } catch (error: unknown) {
+    const execError = error as {
+      stdout?: string
+      stderr?: string
+      code?: number | string
+      killed?: boolean
+      signal?: string
+      message?: string
+    }
+
+    if (execError.killed && execError.signal === 'SIGTERM') {
+      return {
+        stdout: execError.stdout || '',
+        stderr: `Command timed out after ${timeout}ms`,
+        exitCode: -1,
+        success: false,
+      }
+    }
+
+    return {
+      stdout: execError.stdout || '',
+      stderr: execError.stderr || execError.message || 'Unknown error',
+      exitCode: getExitCode(execError.code),
+      success: false,
+    }
+  }
+}
+
 /**
  * Execute a command safely, catching all errors
  * This method never throws and always returns a CommandResult
@@ -455,6 +538,27 @@ export async function execute(
 export async function executeSafe(command: string): Promise<CommandResult> {
   try {
     return await execute(command)
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    return {
+      stdout: '',
+      stderr: errorMessage,
+      exitCode: 1,
+      success: false,
+    }
+  }
+}
+
+/**
+ * Execute a command without shell interpolation and never throw.
+ */
+export async function executeFileSafe(
+  command: string,
+  args: string[] = [],
+  options: ExecutorFileOptions = {}
+): Promise<CommandResult> {
+  try {
+    return await executeFileCommand(command, args, options)
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error'
     return {
@@ -532,10 +636,27 @@ export class CommandExecutor {
   }
 
   /**
+   * Execute a command with explicit arguments and no shell interpolation.
+   */
+  async executeFile(command: string, args: string[] = [], options?: ExecutorFileOptions): Promise<CommandResult> {
+    return executeFileCommand(command, args, {
+      timeout: this.defaultTimeout,
+      ...options,
+    })
+  }
+
+  /**
    * Execute a command safely (never throws)
    */
   async executeSafe(command: string): Promise<CommandResult> {
     return executeSafe(command)
+  }
+
+  /**
+   * Execute a command with explicit arguments and never throw.
+   */
+  async executeFileSafe(command: string, args: string[] = [], options?: ExecutorFileOptions): Promise<CommandResult> {
+    return executeFileSafe(command, args, options)
   }
 
   /**

@@ -11,10 +11,8 @@
 import { promises as fs } from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { exec } from 'child_process'
-import { promisify } from 'util'
-
-const execAsync = promisify(exec)
+import { executeFileCommand } from './commandExecutor'
+import { inputValidator } from './security'
 
 export interface CacheInfo {
   id: string                    // Unique identifier (e.g., 'npm', 'yarn')
@@ -116,15 +114,20 @@ async function getDirectorySizeFast(dirPath: string): Promise<number> {
   try {
     // Use native commands for speed
     const isWin = process.platform === 'win32'
-    let result: { stdout: string; stderr: string }
     
     if (isWin) {
       // Windows: use PowerShell for faster calculation
-      const escapedPath = dirPath.replace(/'/g, "''")
-      result = await execAsync(
-        `powershell -Command "(Get-ChildItem -LiteralPath '${escapedPath}' -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum"`,
+      const result = await executeFileCommand(
+        'powershell',
+        [
+          '-NoProfile',
+          '-Command',
+          '(Get-ChildItem -LiteralPath $args[0] -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum',
+          dirPath,
+        ],
         { timeout: 10000 }
       )
+      if (!result.success) throw new Error(result.stderr || 'PowerShell size command failed')
       const size = parseInt(result.stdout.trim(), 10)
       return isNaN(size) ? 0 : size
     } else {
@@ -132,12 +135,13 @@ async function getDirectorySizeFast(dirPath: string): Promise<number> {
       // NOTE: GNU du supports "-b" (bytes) but macOS/BSD du doesn't.
       // Use "-k" on macOS and convert KiB -> bytes for compatibility.
       const isMac = process.platform === 'darwin'
-      const duCommand = isMac
-        ? `du -sk "${dirPath}" 2>/dev/null | cut -f1`
-        : `du -sb "${dirPath}" 2>/dev/null | cut -f1`
-
-      result = await execAsync(duCommand, { timeout: 10000 })
-      const rawSize = parseInt(result.stdout.trim(), 10)
+      const result = await executeFileCommand(
+        'du',
+        [isMac ? '-sk' : '-sb', dirPath],
+        { timeout: 10000 }
+      )
+      if (!result.success) throw new Error(result.stderr || 'du size command failed')
+      const rawSize = parseInt(result.stdout.trim().split(/\s+/)[0], 10)
       if (isNaN(rawSize)) return 0
       return isMac ? rawSize * 1024 : rawSize
     }
@@ -150,11 +154,33 @@ async function getDirectorySizeFast(dirPath: string): Promise<number> {
 /**
  * Delete directory recursively
  */
-async function deleteDirectory(dirPath: string): Promise<void> {
+async function deleteDirectory(dirPath: string, allowedRoot: string): Promise<void> {
   try {
-    await fs.rm(dirPath, { recursive: true, force: true })
+    const linkStats = await fs.lstat(dirPath)
+    if (linkStats.isSymbolicLink()) {
+      throw new Error('Refusing to delete symbolic link target')
+    }
+
+    const validation = await inputValidator.validateResolvedPath(dirPath, {
+      allowedRoots: [allowedRoot],
+      mustExist: true,
+    })
+
+    if (!validation.valid) {
+      throw new Error(validation.error || 'Unsafe delete target')
+    }
+
+    await fs.rm(validation.value!.realPath, { recursive: true, force: true })
   } catch (error) {
     throw new Error(`Failed to delete ${dirPath}: ${error instanceof Error ? error.message : 'Unknown error'}`)
+  }
+}
+
+function splitCleanCommand(command: string): { command: string; args: string[] } {
+  const parts = command.trim().split(/\s+/).filter(Boolean)
+  return {
+    command: parts[0],
+    args: parts.slice(1),
   }
 }
 
@@ -367,14 +393,21 @@ class CacheScanner {
       // Try native command first if available and requested
       if (useNativeCommand && config.cleanCommand) {
         try {
-          await execAsync(config.cleanCommand, { timeout: 60000 })
+          const nativeCommand = splitCleanCommand(config.cleanCommand)
+          const result = await executeFileCommand(nativeCommand.command, nativeCommand.args, { timeout: 60000 })
+          if (!result.success) {
+            throw new Error(result.stderr || 'Native clean command failed')
+          }
         } catch {
+          if (config.riskLevel === 'high') {
+            throw new Error('Native clean command failed; high-risk cache will not be removed manually')
+          }
           // Native command failed, fall back to manual deletion
-          await deleteDirectory(config.path)
+          await deleteDirectory(config.path, config.path)
         }
       } else {
         // Manual deletion
-        await deleteDirectory(config.path)
+        await deleteDirectory(config.path, config.path)
       }
       
       // Get size after cleaning

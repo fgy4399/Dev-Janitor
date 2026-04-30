@@ -17,6 +17,7 @@ import {
   normalizePath,
   execute,
   executeSafe,
+  executeFileCommand,
   CommandExecutor,
 } from './commandExecutor'
 
@@ -209,6 +210,34 @@ describe('CommandExecutor', () => {
     })
   })
 
+  describe('executeFileCommand', () => {
+    it('should execute command with explicit args successfully', async () => {
+      const result = await executeFileCommand(process.execPath, ['--version'])
+
+      expect(result.success).toBe(true)
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout.trim()).toMatch(/^v\d+/)
+    })
+
+    it('should not interpret shell metacharacters in args', async () => {
+      const script = 'console.log(process.argv[1])'
+      const arg = 'hello; rm -rf /'
+      const result = await executeFileCommand(process.execPath, ['-e', script, arg])
+
+      expect(result.success).toBe(true)
+      expect(result.stdout.trim()).toBe(arg)
+    })
+
+    it('should not execute command substitution in args', async () => {
+      const script = 'console.log(process.argv[1])'
+      const arg = '$(echo injected)'
+      const result = await executeFileCommand(process.execPath, ['-e', script, arg])
+
+      expect(result.success).toBe(true)
+      expect(result.stdout.trim()).toBe(arg)
+    })
+  })
+
   describe('CommandExecutor class', () => {
     let executor: CommandExecutor
 
@@ -218,6 +247,11 @@ describe('CommandExecutor', () => {
 
     it('should execute commands', async () => {
       const result = await executor.execute('echo test')
+      expect(result.success).toBe(true)
+    })
+
+    it('should execute command files', async () => {
+      const result = await executor.executeFile(process.execPath, ['--version'])
       expect(result.success).toBe(true)
     })
 
