@@ -13,6 +13,7 @@
 import { exec, ExecOptions } from 'child_process'
 import { promisify } from 'util'
 import { CommandResult } from '../shared/types'
+import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -64,6 +65,161 @@ function ensureMacOSPathCompatibility(): void {
 }
 
 ensureMacOSPathCompatibility()
+
+/**
+ * macOS（以及部分 Linux 桌面环境）从 Finder/Launcher 启动应用时，进程的 PATH 往往不包含 Homebrew 等开发工具目录。
+ * 这会导致 `npm --version`、`which npm`、以及 AI CLI（codex/claude/gemini 等）检测/安装误判为“未安装”。
+ *
+ * 这里在执行系统命令时，为子进程补齐一组常见 PATH 目录（不改变当前进程的 process.env.PATH），用于提高检测与安装的可靠性。
+ */
+let cachedAugmentedPathEntries: string[] | null = null
+
+function getPathSeparatorForEnv(): string {
+  return isWindows() ? ';' : ':'
+}
+
+function getEnvPathKey(env: NodeJS.ProcessEnv): string {
+  const existingKey = Object.keys(env).find(k => k.toLowerCase() === 'path')
+  if (existingKey) return existingKey
+  return isWindows() ? 'Path' : 'PATH'
+}
+
+function normalizePathEntry(p: string): string {
+  return normalizePath(p)
+}
+
+function findLatestNvmBin(): string | null {
+  if (isWindows()) return null
+
+  const homeDir = os.homedir()
+  const nvmDir = process.env.NVM_DIR || path.join(homeDir, '.nvm')
+  const versionsDir = path.join(nvmDir, 'versions', 'node')
+
+  try {
+    if (!fs.existsSync(versionsDir)) return null
+
+    const entries = fs.readdirSync(versionsDir, { withFileTypes: true })
+    const versionDirs = entries
+      .filter(e => e.isDirectory())
+      .map(e => e.name)
+      .filter(name => /^v?\d+\.\d+\.\d+/.test(name))
+
+    if (versionDirs.length === 0) return null
+
+    const parse = (name: string) => {
+      const cleaned = name.startsWith('v') ? name.slice(1) : name
+      const [major, minor, patch] = cleaned.split('.').map(n => Number.parseInt(n, 10))
+      return { major: major || 0, minor: minor || 0, patch: patch || 0, raw: name }
+    }
+
+    versionDirs.sort((a, b) => {
+      const va = parse(a)
+      const vb = parse(b)
+      if (va.major !== vb.major) return vb.major - va.major
+      if (va.minor !== vb.minor) return vb.minor - va.minor
+      return vb.patch - va.patch
+    })
+
+    const candidate = path.join(versionsDir, versionDirs[0], 'bin')
+    return fs.existsSync(candidate) ? candidate : null
+  } catch {
+    return null
+  }
+}
+
+function getAugmentedPathEntries(): string[] {
+  if (cachedAugmentedPathEntries) return cachedAugmentedPathEntries
+
+  // Windows 的 PATH 通常由系统正确注入，这里不做额外补齐，避免覆盖用户设置。
+  if (isWindows()) {
+    cachedAugmentedPathEntries = []
+    return cachedAugmentedPathEntries
+  }
+
+  const homeDir = os.homedir()
+  const candidates: string[] = [
+    // 用户级常见可执行目录
+    path.join(homeDir, '.local', 'bin'),
+    path.join(homeDir, 'bin'),
+    path.join(homeDir, '.cargo', 'bin'),
+    path.join(homeDir, '.volta', 'bin'),
+    path.join(homeDir, '.asdf', 'shims'),
+  ]
+
+  const nvmBin = findLatestNvmBin()
+  if (nvmBin) {
+    candidates.push(nvmBin)
+  }
+
+  // macOS：Homebrew（Apple Silicon + Intel）常见位置
+  if (isMacOS()) {
+    candidates.push('/opt/homebrew/bin', '/opt/homebrew/sbin')
+    candidates.push('/usr/local/bin', '/usr/local/sbin')
+  } else {
+    // Linux：常见本地安装目录
+    candidates.push('/usr/local/bin', '/usr/local/sbin')
+  }
+
+  // 兜底：系统默认目录（保证即使 PATH 为空，也能找到基本命令）
+  candidates.push('/usr/bin', '/bin', '/usr/sbin', '/sbin')
+
+  // 过滤不存在的目录，避免污染 PATH
+  const existing = candidates.filter(p => {
+    try {
+      return fs.existsSync(p)
+    } catch {
+      return false
+    }
+  })
+
+  // 去重（macOS 文件系统通常大小写不敏感，这里与 Windows 一样按小写去重）
+  const seen = new Set<string>()
+  const deduped: string[] = []
+  for (const p of existing.map(normalizePathEntry)) {
+    const key = (isMacOS() || isWindows()) ? p.toLowerCase() : p
+    if (!seen.has(key)) {
+      seen.add(key)
+      deduped.push(p)
+    }
+  }
+
+  cachedAugmentedPathEntries = deduped
+  return cachedAugmentedPathEntries
+}
+
+function mergePathValue(original: string): string {
+  const separator = getPathSeparatorForEnv()
+  const existing = (original || '')
+    .split(separator)
+    .map(s => s.trim())
+    .filter(s => s.length > 0)
+    .map(normalizePathEntry)
+
+  const additions = getAugmentedPathEntries().map(normalizePathEntry)
+
+  const seen = new Set<string>()
+  const merged: string[] = []
+
+  const pushUnique = (p: string) => {
+    const key = (isMacOS() || isWindows()) ? p.toLowerCase() : p
+    if (seen.has(key)) return
+    seen.add(key)
+    merged.push(p)
+  }
+
+  for (const p of existing) pushUnique(p)
+  for (const p of additions) pushUnique(p)
+
+  return merged.join(separator)
+}
+
+function buildCommandEnv(optionsEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const mergedEnv: NodeJS.ProcessEnv = { ...process.env, ...optionsEnv }
+  const pathKey = getEnvPathKey(mergedEnv)
+  const currentPath = mergedEnv[pathKey] || ''
+  mergedEnv[pathKey] = mergePathValue(currentPath)
+  return mergedEnv
+}
 
 /**
  * Timeout presets for different command categories
@@ -242,8 +398,10 @@ export async function execute(
     : (options.timeout ?? DEFAULT_TIMEOUT)
 
   try {
+    const env = buildCommandEnv(options.env)
     const { stdout, stderr } = await execAsync(command, {
       ...options,
+      env,
       timeout,
       windowsHide: true, // Hide console window on Windows
       encoding: 'utf8', // Ensure string output

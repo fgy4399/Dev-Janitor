@@ -7,6 +7,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest'
 import fc from 'fast-check'
+import * as fs from 'fs'
 import {
   getPlatform,
   isWindows,
@@ -147,6 +148,21 @@ describe('CommandExecutor', () => {
       
       expect(result.success).toBe(false)
       expect(result.stderr).toContain('timed out')
+    })
+
+    it('should augment PATH for child processes on Unix-like systems', async () => {
+      if (isWindows()) return
+
+      const result = await execute('echo $PATH', { env: { PATH: '' } })
+      expect(result.success).toBe(true)
+
+      const entries = result.stdout.trim().split(':').filter(Boolean)
+      expect(entries).toContain('/usr/bin')
+      expect(entries).toContain('/bin')
+
+      if (isMacOS() && fs.existsSync('/opt/homebrew/bin')) {
+        expect(entries).toContain('/opt/homebrew/bin')
+      }
     })
   })
 
